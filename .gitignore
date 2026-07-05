@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+.next/
+*.egg-info/
+.env
+backend/data/
+celerybeat-schedule*
+# model weights — distributed separately, never committed
+*.onnx
+*.pt
+*.pth

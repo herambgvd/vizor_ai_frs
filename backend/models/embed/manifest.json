@@ -1,0 +1,8 @@
+{
+  "family": "arcface",
+  "task": "embed",
+  "weights": "embed.onnx",
+  "input_size": [112, 112],
+  "embed_dim": 512,
+  "backend": "onnx"
+}

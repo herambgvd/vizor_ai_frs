@@ -1,0 +1,34 @@
+/* Vercel-style theme tokens. Light = default (:root); dark = .dark on <html>.
+   Switching themes is just a shift of these variables — components read them via
+   Tailwind semantic colors (bg-background, text-foreground, bg-card, border-card-border, …). */
+:root {
+  --background: #ffffff;
+  --foreground: #000000;
+  --card: #ffffff;
+  --card-border: #eaeaea;
+  --muted: #666666;
+  --hover: #f5f5f5;
+  --field-border: #e2e2e2;
+}
+
+.dark {
+  --background: #000000;
+  --foreground: #ededed;
+  --card: #0a0a0a;
+  --card-border: #262626;
+  --muted: #a1a1a1;
+  --hover: #171717;
+  --field-border: #2a2a2a;
+}
+
+/* Modal / dropdown entrance animations */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes modal-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.animate-fade-in { animation: fade-in 0.15s ease-out; }
+.animate-modal-in { animation: modal-in 0.18s cubic-bezier(0.16, 1, 0.3, 1); }

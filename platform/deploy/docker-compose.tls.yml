@@ -1,0 +1,42 @@
+# Production TLS overlay — adds a Caddy reverse proxy in front of the stack and
+# removes the direct host port bindings from backend/frontend so ONLY 80/443
+# (Caddy) are reachable from outside. Compose with the scenario's base file:
+#
+#   cd frs/backend
+#   SITE_DOMAIN=frs.example.com ACME_EMAIL=ops@example.com \
+#     docker compose -f docker-compose.yml -f ../../platform/deploy/docker-compose.tls.yml up -d
+#
+# The base file publishes backend :8000 and frontend :3000 for dev; this overlay
+# overrides those services to publish NOTHING (they're reached only via Caddy on
+# the internal network), then adds the proxy. Postgres/Redis/Qdrant are already
+# internal-only in the base file.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      SITE_DOMAIN: "${SITE_DOMAIN:-localhost}"
+      ACME_EMAIL: "${ACME_EMAIL:-admin@example.com}"
+    volumes:
+      - ../../platform/deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data # certificates + ACME state (persist across restarts!)
+      - caddy_config:/config
+    depends_on:
+      - backend
+      - frontend
+
+  # Stop publishing the app ports to the host — traffic must go through Caddy.
+  backend:
+    ports: !reset []
+
+  frontend:
+    ports: !reset []
+
+volumes:
+  caddy_data:
+  caddy_config:

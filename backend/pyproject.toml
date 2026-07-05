@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vizor-frs-backend"
+version = "0.1.0"
+description = "Vizor FRS — face recognition scenario app on the edge boilerplate"
+requires-python = ">=3.11"
+
+# `edge` is the shared boilerplate at ../../boilerplate — installed editable in dev
+# (see docker-compose command / README). FRS-specific deps go here.
+dependencies = [
+    "qdrant-client>=1.9",     # vector matching (faceprints)
+]
+
+[project.optional-dependencies]
+runtime = ["onnxruntime>=1.18", "numpy>=1.26", "opencv-python-headless>=4.9"]
+face    = ["insightface>=0.7", "onnx>=1.15"]   # SCRFD + AdaFace/ArcFace helpers
+dev     = ["pytest>=8", "pytest-asyncio>=0.23", "aiosqlite>=0.20"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]

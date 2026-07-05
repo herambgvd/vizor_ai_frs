@@ -1,0 +1,104 @@
+# Platform-base stack. `cp .env.example .env` then `docker compose up`.
+services:
+  postgres:
+    # TimescaleDB image = Postgres + the timescaledb extension (event hypertables).
+    image: timescale/timescaledb:latest-pg16
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # S3-compatible object storage (logos, report exports, face crops, clips).
+  # storage_backend defaults to "local"; set VE_STORAGE_BACKEND=s3 (+ VE_S3_*) to use this.
+  rustfs:
+    image: rustfs/rustfs:latest
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - rustfs_data:/data
+
+  # Dev SMTP sink + web UI (http://localhost:1080) for testing the email channel.
+  maildev:
+    image: maildev/maildev:latest
+    restart: unless-stopped
+    ports:
+      - "1025:1025"
+      - "1080:1080"
+
+  # Single media server: pulls each camera once, republishes to inference +
+  # browser (WebRTC/HLS) + recorder. Used by the CV layers (built next).
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    restart: unless-stopped
+    ports:
+      - "8554:8554"   # RTSP
+      - "8889:8889"   # WebRTC
+      - "8888:8888"   # HLS
+      - "9997:9997"   # control API
+
+  backend:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    # Run migrations, then the API with autoreload for dev.
+    command: >
+      bash -c "alembic upgrade head &&
+               uvicorn example.main:app --host 0.0.0.0 --port 8000 --reload"
+
+  # Background jobs (report exports, retention cleanup).
+  worker:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    command: celery -A edge.tasks.app.celery_app worker -l info
+
+  # Scheduled jobs (Celery beat).
+  beat:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    command: celery -A edge.tasks.app.celery_app beat -l info
+
+volumes:
+  pgdata:
+  rustfs_data:

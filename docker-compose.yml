@@ -1,0 +1,117 @@
+# FRS stack (standalone repo). From the repo root:  cp .env.example .env && docker compose up
+# Build context is the repo root so the backend image can COPY the vendored ./platform.
+name: frs
+
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    restart: unless-stopped
+    env_file: .env
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports: ["6379:6379"]
+    healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 5s, timeout: 3s, retries: 5 }
+
+  rustfs:
+    image: rustfs/rustfs:latest
+    restart: unless-stopped
+    env_file: .env
+    ports: ["9000:9000", "9001:9001"]
+    volumes: ["rustfs_data:/data"]
+
+  maildev:
+    image: maildev/maildev:latest
+    restart: unless-stopped
+    ports: ["1025:1025", "1080:1080"]
+
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    restart: unless-stopped
+    ports: ["8554:8554", "8889:8889", "8888:8888", "9997:9997"]
+    volumes: ["./backend/mediamtx.yml:/mediamtx.yml"]
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    ports: ["6333:6333"]
+    volumes: ["qdrant_data:/qdrant/storage"]
+
+  backend:
+    build: { context: ., dockerfile: backend/Dockerfile }
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      VE_QDRANT_URL: "http://qdrant:6333"
+      VE_MEDIAMTX_URL: "http://mediamtx:9997"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      qdrant: { condition: service_started }
+    ports: ["8000:8000"]
+    volumes: ["./platform:/edge", "./backend:/app"]
+    command: >
+      bash -c "alembic upgrade head &&
+               uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+  worker:
+    build: { context: ., dockerfile: backend/Dockerfile }
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      VE_QDRANT_URL: "http://qdrant:6333"
+      VE_MEDIAMTX_URL: "http://mediamtx:9997"
+    depends_on:
+      redis: { condition: service_healthy }
+    volumes: ["./platform:/edge", "./backend:/app"]
+    command: celery -A edge.tasks.app.celery_app worker -l info
+
+  # Live FRS recognition supervisor. Off by default (profile "live") — needs real RTSP
+  # cameras. Enable with: docker compose --profile live up -d streams
+  streams:
+    profiles: ["live"]
+    build: { context: ., dockerfile: backend/Dockerfile }
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      VE_QDRANT_URL: "http://qdrant:6333"
+      VE_MEDIAMTX_URL: "http://mediamtx:9997"
+    depends_on:
+      postgres: { condition: service_healthy }
+      qdrant: { condition: service_started }
+    volumes: ["./platform:/edge", "./backend:/app"]
+    command: python -m app.stream_supervisor
+
+  beat:
+    build: { context: ., dockerfile: backend/Dockerfile }
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      redis: { condition: service_healthy }
+    volumes: ["./platform:/edge", "./backend:/app"]
+    command: celery -A edge.tasks.app.celery_app beat -l info
+
+  frontend:
+    build: { context: ./frontend, dockerfile: Dockerfile }
+    restart: unless-stopped
+    environment:
+      WATCHPACK_POLLING: "true"
+    ports: ["3000:3000"]
+    depends_on: [backend]
+    volumes:
+      - ./frontend:/app
+      - ./platform/web:/app/web
+      - /app/node_modules
+
+volumes:
+  pgdata:
+  rustfs_data:
+  qdrant_data:

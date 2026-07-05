@@ -1,0 +1,63 @@
+# Production TLS reverse proxy for any Vizor edge scenario (FRS, ANPR, …).
+#
+# Caddy terminates HTTPS (auto-provisioning + renewing a Let's Encrypt certificate
+# for {$SITE_DOMAIN}) and is the ONLY process exposed to the internet. The FastAPI
+# backend and the Next.js frontend stay on the internal Docker network — never
+# published to the host — so every request is TLS-terminated and header-hardened
+# here first.
+#
+# Usage (see deploy/README.md):
+#   SITE_DOMAIN=frs.example.com docker compose -f docker-compose.yml \
+#       -f ../../platform/deploy/docker-compose.tls.yml up -d
+#
+# For local/staging without a public DNS name, set SITE_DOMAIN=localhost — Caddy
+# then issues its own internal CA cert (trust it locally, or accept the warning).
+
+{
+	# Operational hardening: no admin API surface, contact for cert issues.
+	admin off
+	email {$ACME_EMAIL:admin@example.com}
+}
+
+{$SITE_DOMAIN:localhost} {
+	# --- security response headers (authoritative — real domain known here) ---
+	header {
+		# Force HTTPS for 2 years incl. subdomains; eligible for preload lists.
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+		X-Permitted-Cross-Domain-Policies "none"
+		Cross-Origin-Opener-Policy "same-origin"
+		# App-wide CSP. 'unsafe-inline' is required by Next.js runtime styles; tighten
+		# with a nonce/hashes if your build supports it. connect-src covers the API
+		# (same origin) + the WS live feed (wss, same host).
+		Content-Security-Policy "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; font-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		# Don't advertise the server software.
+		-Server
+	}
+
+	# Cap request bodies (face uploads are small; block oversized abuse).
+	request_body {
+		max_size 25MB
+	}
+
+	# --- routing: API + object store + docs → backend, everything else → UI ---
+	@backend path /api/* /files/* /health /ready /metrics /docs /redoc /openapi.json
+	handle @backend {
+		reverse_proxy backend:8000
+	}
+
+	# WebSocket live-detection feed (same backend; Caddy proxies upgrades natively).
+	@ws path /ws/*
+	handle @ws {
+		reverse_proxy backend:8000
+	}
+
+	handle {
+		reverse_proxy frontend:3000
+	}
+
+	encode gzip zstd
+}
