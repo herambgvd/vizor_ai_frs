@@ -5,6 +5,7 @@ node_modules/
 .next/
 *.egg-info/
 .env
+.env.shared
 backend/data/
 celerybeat-schedule*
 # model weights — distributed separately, never committed
