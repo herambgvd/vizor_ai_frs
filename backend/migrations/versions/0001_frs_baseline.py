@@ -1,8 +1,10 @@
-"""frs baseline — create the edge base tables (+ FRS tables as they're added)
+"""frs consolidated baseline — create all edge + FRS tables from ORM metadata.
 
-Revision ID: 0001_frs_baseline
-Revises:
-Create Date: 2026-07-03
+Standalone-repo baseline: a single ``create_all`` of the current edge base + the FRS
+domain models. The old incremental chain (0002–0020) is collapsed here so a FRESH
+database builds the complete, correct schema in one step (the incremental chain
+double-created columns the current edge models already declare). Future schema
+changes add new revisions on top of this.
 """
 
 from alembic import op
@@ -14,14 +16,14 @@ depends_on = None
 
 
 def _metadata():
+    # Import inside the function so models register on Base.metadata at run time.
     from edge.db.base import Base
     import edge.auth.models  # noqa: F401
     import edge.core.audit  # noqa: F401
     import edge.messaging  # noqa: F401
     import edge.branding.models  # noqa: F401
     import edge.reports.models  # noqa: F401
-
-    # import app.domain  # noqa: F401  (FRS tables, when built)
+    import app.domain.models  # noqa: F401 — FRS domain tables
     return Base.metadata
 
 

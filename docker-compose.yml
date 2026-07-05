@@ -36,7 +36,7 @@ services:
   mediamtx:
     image: bluenviron/mediamtx:latest
     restart: unless-stopped
-    ports: ["8554:8554", "8889:8889", "8888:8888", "9997:9997"]
+    ports: ["8600:8554", "8602:8889", "8601:8888", "8603:9997"]
     volumes: ["./backend/mediamtx.yml:/mediamtx.yml"]
 
   qdrant:
