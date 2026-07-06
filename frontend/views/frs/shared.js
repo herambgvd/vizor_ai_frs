@@ -2,7 +2,7 @@
 // frsShared.js, re-themed to our kit Badge colours.
 
 export const ENROLL_COLOR = { enrolled: "green", pending: "amber", failed: "red", unenrolled: "slate" };
-export const EVENT_COLOR = { face_recognized: "green", face_unknown: "amber", spoof_detected: "red", face_detected: "blue" };
+export const EVENT_COLOR = { face_recognized: "green", face_unknown: "amber", spoof_detected: "red", face_detected: "blue", transit_overdue: "red" };
 export const CATEGORY_COLOR = { vip: "indigo", monitored: "amber", restricted: "amber", banned: "red", standard: "slate" };
 export const SESSION_COLOR = { open: "amber", completed: "green", closed: "green", overdue: "red" };
 
@@ -36,6 +36,15 @@ export const CAM_DIRECTIONS = [
 export const CAM_HWACCEL = [
   { value: "none", label: "CPU (software)" },
   { value: "nvdec", label: "NVDEC (GPU)" },
+];
+
+// Max width frames are downscaled to for analysis (0 = native). Values are strings
+// so they bind cleanly to a <select>; the caller converts back to Number on save.
+export const CAM_ANALYZE_RES = [
+  { value: "0", label: "Native (full resolution)" },
+  { value: "1920", label: "1080p (1920 wide) — recommended" },
+  { value: "1280", label: "720p (1280 wide) — lowest CPU" },
+  { value: "960", label: "960 wide — very low CPU" },
 ];
 
 export function confColor(c) {

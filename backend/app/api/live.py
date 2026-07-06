@@ -15,6 +15,7 @@ import uuid
 
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -123,6 +124,7 @@ async def live_feed(
     storage = get_storage()
     items = []
     for e in rows:
+        attrs = e.attributes or {}
         items.append({
             "id": str(e.id),
             "event_type": e.event_type,
@@ -134,6 +136,20 @@ async def live_feed(
             "liveness_score": e.liveness_score,
             "snapshot_url": await storage.url(e.snapshot_key) if e.snapshot_key else None,
             "triggered_at": e.triggered_at.isoformat() if e.triggered_at else None,
+            # Extra fields so the Live events modal can show complete info.
+            "title": e.title,
+            "severity": e.severity,
+            "detection_type": e.detection_type,
+            "track_id": e.track_id,
+            "bbox": e.bbox or [],
+            "age": e.age,
+            "age_range": e.age_range,
+            "gender": e.gender,
+            "gender_confidence": e.gender_confidence,
+            "authorized": attrs.get("authorized"),
+            "auth_reason": attrs.get("auth_reason"),
+            "group_name": attrs.get("group_name"),
+            "direction": attrs.get("direction"),
         })
     return {"items": items}
 
@@ -191,7 +207,9 @@ async def register_stream(
     if camera is None:
         raise NotFoundError(f"camera {camera_id} not found")
     try:
-        return _stream_urls_for(camera)
+        # _stream_urls_for makes blocking sync HTTP calls to MediaMTX — run it off the
+        # event loop so it doesn't stall other requests.
+        return await run_in_threadpool(_stream_urls_for, camera)
     except MediaMTXError as exc:
         log.error("MediaMTX register failed for camera %s: %s", camera_id, exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -216,7 +234,8 @@ async def list_streams(
     for c in rows:
         entry = {"camera_id": str(c.id)}
         try:
-            entry.update(_stream_urls_for(c))
+            # Blocking sync MediaMTX HTTP calls — keep them off the event loop.
+            entry.update(await run_in_threadpool(_stream_urls_for, c))
         except MediaMTXError as exc:
             entry["error"] = str(exc)
             log.warning("MediaMTX register failed for camera %s: %s", c.id, exc)

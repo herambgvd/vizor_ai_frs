@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { Icon } from "@iconify/react";
 import { toast } from "sonner";
@@ -18,12 +18,71 @@ const TYPE_OPTS = [
   { value: "spoof_detected", label: "Spoof" },
   { value: "face_detected", label: "Detected" },
 ];
-const TYPE_LABEL = { face_recognized: "Recognised", face_unknown: "Unknown", spoof_detected: "Spoof", face_detected: "Detected" };
+const TYPE_LABEL = { face_recognized: "Recognised", face_unknown: "Unknown", spoof_detected: "Spoof", face_detected: "Detected", transit_overdue: "Transit Overdue" };
 
 function Thumb({ url, icon = "heroicons-outline:photo", className = "h-10 w-16" }) {
   return (
     <div className={`${className} rounded bg-black/40 border border-card-border overflow-hidden flex items-center justify-center shrink-0`}>
       {url ? <img src={fileUrl(url)} alt="" loading="lazy" className="h-full w-full object-cover" /> : <Icon icon={icon} className="text-muted" />}
+    </div>
+  );
+}
+
+// The stored snapshot is the FULL frame; the detected face is cropped from it on
+// the fly using the event's (native-pixel) bbox — so we never store/serve the same
+// crop twice. Draws the padded bbox region of the frame onto a canvas.
+function FaceCrop({ url, bbox, className = "h-10 w-16", icon = "heroicons-outline:user" }) {
+  const ref = useRef(null);
+  const has = !!url && Array.isArray(bbox) && bbox.length === 4;
+  useEffect(() => {
+    if (!has) return;
+    const canvas = ref.current;
+    if (!canvas) return;
+    const img = new window.Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      const nw = img.naturalWidth, nh = img.naturalHeight;
+      let [x1, y1, x2, y2] = bbox.map(Number);
+      // Legacy events stored the face crop itself (not the full frame); their
+      // frame-coord bbox won't fit → just show the whole (already-cropped) image.
+      if (!(x2 > x1 && y2 > y1) || x2 > nw + 4 || y2 > nh + 4) {
+        canvas.width = nw; canvas.height = nh;
+        try { canvas.getContext("2d").drawImage(img, 0, 0); } catch { /* noop */ }
+        return;
+      }
+      const bw = Math.max(1, x2 - x1), bh = Math.max(1, y2 - y1), pad = 0.3;
+      x1 = Math.max(0, x1 - bw * pad); y1 = Math.max(0, y1 - bh * pad);
+      x2 = Math.min(nw, x2 + bw * pad); y2 = Math.min(nh, y2 + bh * pad);
+      const cw = Math.max(1, x2 - x1), ch = Math.max(1, y2 - y1);
+      canvas.width = cw; canvas.height = ch;
+      try { canvas.getContext("2d").drawImage(img, x1, y1, cw, ch, 0, 0, cw, ch); } catch { /* noop */ }
+    };
+    img.src = fileUrl(url);
+  }, [url, has, JSON.stringify(bbox)]);
+  return (
+    <div className={`${className} rounded bg-black/40 border border-card-border overflow-hidden flex items-center justify-center shrink-0`}>
+      {has ? <canvas ref={ref} className="h-full w-full object-cover" /> : <Icon icon={icon} className="text-muted" />}
+    </div>
+  );
+}
+
+// Full-frame snapshot with the detection box overlaid. The SVG viewBox matches the
+// image's natural size + preserveAspectRatio "meet" (== object-contain), so the box
+// aligns to the letterboxed frame regardless of container size.
+function SnapshotWithBox({ url, bbox }) {
+  const [dims, setDims] = useState(null);
+  if (!url) return <Icon icon="heroicons-outline:photo" className="text-4xl text-muted" />;
+  const box = Array.isArray(bbox) && bbox.length === 4 ? bbox.map(Number) : null;
+  return (
+    <div className="relative h-full w-full">
+      <img src={fileUrl(url)} alt="" className="h-full w-full object-contain"
+        onLoad={(e) => setDims({ w: e.target.naturalWidth, h: e.target.naturalHeight })} />
+      {dims && box && (
+        <svg viewBox={`0 0 ${dims.w} ${dims.h}`} preserveAspectRatio="xMidYMid meet" className="absolute inset-0 h-full w-full pointer-events-none">
+          <rect x={box[0]} y={box[1]} width={box[2] - box[0]} height={box[3] - box[1]}
+            fill="none" stroke="#22c55e" strokeWidth={Math.max(2, dims.w / 320)} />
+        </svg>
+      )}
     </div>
   );
 }
@@ -150,7 +209,7 @@ export default function EventsTab() {
                       {e.confidence != null && <span className={`text-xs tabular-nums text-${confColor(e.confidence)}-500`}>{pct(e.confidence)}</span>}
                     </div>
                   </td>
-                  <td className="px-3 py-2"><Thumb url={e.snapshot_url} /></td>
+                  <td className="px-3 py-2"><FaceCrop url={e.snapshot_url} bbox={e.bbox} /></td>
                   <td className="px-3 py-2"><Thumb url={e.match_thumb_url} icon="heroicons-outline:user" className="h-10 w-10" /></td>
                   <td className="px-3 py-2 text-right whitespace-nowrap" onClick={(ev) => ev.stopPropagation()}>
                     {e.feedback && <Icon icon={e.feedback === "correct" ? "heroicons-solid:check-circle" : "heroicons-solid:x-circle"} className={`inline mr-2 ${e.feedback === "correct" ? "text-green-500" : "text-red-500"}`} />}
@@ -187,16 +246,14 @@ export default function EventsTab() {
             <div className="md:col-span-3 flex flex-col">
               <div className="text-[10px] uppercase tracking-wider text-muted mb-1.5">Snapshot</div>
               <div className="flex-1 min-h-[240px] rounded-lg bg-black/40 border border-card-border overflow-hidden flex items-center justify-center">
-                {detail.snapshot_url ? <img src={fileUrl(detail.snapshot_url)} alt="" className="h-full w-full object-contain" /> : <Icon icon="heroicons-outline:photo" className="text-4xl text-muted" />}
+                <SnapshotWithBox url={detail.snapshot_url} bbox={detail.bbox} />
               </div>
             </div>
             <div className="md:col-span-2 flex flex-col gap-3">
               <div className="flex gap-3">
                 <div className="flex-1">
                   <div className="text-[10px] uppercase tracking-wider text-muted mb-1.5">Detected face</div>
-                  <div className="aspect-square rounded-lg bg-black/40 border border-card-border overflow-hidden flex items-center justify-center">
-                    {detail.snapshot_url ? <img src={fileUrl(detail.snapshot_url)} alt="" className="h-full w-full object-cover" /> : <Icon icon="heroicons-outline:face-frown" className="text-2xl text-muted" />}
-                  </div>
+                  <FaceCrop url={detail.snapshot_url} bbox={detail.bbox} className="aspect-square w-full" icon="heroicons-outline:face-frown" />
                 </div>
                 {detail.match_thumb_url && (
                   <div className="flex-1">

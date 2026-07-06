@@ -43,8 +43,11 @@ async def on_recognition(
     person_id,
     person_name: str | None = None,
     camera_id=None,
+    camera_name: str | None = None,
     when: dt.datetime,
     snapshot_key: str | None = None,
+    bbox: list | None = None,
+    confidence: float | None = None,
 ) -> None:
     """Drive transit state from a recognised-person sighting.
 
@@ -120,6 +123,16 @@ async def on_recognition(
                 attrs["person_name"] = person_name
             if snapshot_key:
                 attrs["entry_snapshot"] = snapshot_key
+            # Store the entry face box too, so the overdue event can crop the
+            # detected face out of the entry frame (parity with normal events).
+            if bbox:
+                attrs["entry_bbox"] = list(bbox)
+            # Carry the entry camera + recognition confidence so the overdue event
+            # can show them (otherwise Camera/Confidence render as "—").
+            if camera_name:
+                attrs["entry_camera_name"] = camera_name
+            if confidence is not None:
+                attrs["entry_confidence"] = confidence
             db.add(TransitSession(
                 rule_id=rule.id, person_id=person_id, status="open",
                 started_at=when, attributes=attrs,
@@ -164,7 +177,10 @@ async def sweep_overdue(db, now: dt.datetime | None = None) -> int:
                     "person_id": sess.person_id,
                     "person_name": attrs.get("person_name"),
                     "entry_camera": attrs.get("entry_camera"),
+                    "entry_camera_name": attrs.get("entry_camera_name"),
                     "entry_snapshot": attrs.get("entry_snapshot"),
+                    "entry_bbox": attrs.get("entry_bbox"),
+                    "entry_confidence": attrs.get("entry_confidence"),
                     "entry_ts": attrs.get("entry_ts"),
                     "deadline": dl,
                     "overdue_seconds": int((now - deadline).total_seconds()),
@@ -215,6 +231,7 @@ async def _emit_overdue_event(db, f: dict, now: dt.datetime) -> None:
         person_name=person_name,
         camera_id=_as_uuid(f.get("entry_camera")),
         snapshot_key=f.get("entry_snapshot"),
+        bbox=f.get("entry_bbox") or [],
         triggered_at=now,
         attributes={
             # Stash the resolved name in attributes too — the Events UI reads

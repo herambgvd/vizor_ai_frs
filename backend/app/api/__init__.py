@@ -5,7 +5,10 @@ Importing this package also registers the FRS permission catalog (via
 added to ``domain_routers()`` as they are ported.
 """
 
+from fastapi import Depends
+
 from ..domain import permissions as _perms  # noqa: F401 — registers FRS perms on import
+from ..licensing_gate import modules_router, require_module
 from .cameras import router as cameras_router
 from .events import feedback_router, router as events_router
 from .groups import router as groups_router
@@ -20,13 +23,23 @@ from .settings import router as settings_router
 from .transit import router as transit_router
 from .tts import router as tts_router
 
+# License-gate the optional FEATURE modules (no-op under a dev/unlimited license;
+# 403 in prod when the client's license omits the module). Applied via each
+# router's own dependency list so the paths stay /frs/... and the router files are
+# untouched. Core capture routers (cameras/persons/groups/photos/events/live/ingest/
+# settings/tts/public) are always on. reports_router carries reports + attendance
+# (gated "reports"); investigate_router carries investigate + tour ("investigate").
+transit_router.dependencies.append(Depends(require_module("transit")))
+investigate_router.dependencies.append(Depends(require_module("investigate")))
+reports_router.dependencies.append(Depends(require_module("reports")))
+
 
 def domain_routers():
     """Every FRS domain CRUD router, for create_base_app(extra_routers=...)."""
     return [
         groups_router, persons_router, photos_router, investigate_router, transit_router,
         reports_router, settings_router, ingest_router, public_router, tts_router,
-        cameras_router, events_router, feedback_router, live_router,
+        cameras_router, events_router, feedback_router, live_router, modules_router,
     ]
 
 

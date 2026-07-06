@@ -5,11 +5,11 @@ import { useQuery } from "@tanstack/react-query";
 import { Icon } from "@iconify/react";
 
 import { api, fileUrl, tokens } from "@/web/api";
-import { Select } from "@/web/kit";
+import { Badge, Modal, Select } from "@/web/kit";
 
-import { EVENT_COLOR, fmtTime, pct } from "./shared";
+import { EVENT_COLOR, confColor, fmt, fmtTime, pct } from "./shared";
 
-const TYPE_LABEL = { face_recognized: "Recognised", face_unknown: "Unknown", spoof_detected: "Spoof", face_detected: "Detected" };
+const TYPE_LABEL = { face_recognized: "Recognised", face_unknown: "Unknown", spoof_detected: "Spoof", face_detected: "Detected", transit_overdue: "Transit Overdue" };
 // VMS grid layouts: cell-count -> column-count.
 const LAYOUTS = [
   { n: 1, cols: 1 }, { n: 4, cols: 2 }, { n: 9, cols: 3 }, { n: 16, cols: 4 },
@@ -533,10 +533,74 @@ function Tile({ cam, last, subscribeOverlay }) {
   );
 }
 
+// Full-frame snapshot with the detection box overlaid (same pattern as EventsTab).
+function SnapshotWithBox({ url, bbox }) {
+  const [dims, setDims] = useState(null);
+  if (!url) return <Icon icon="heroicons-outline:photo" className="text-4xl text-muted" />;
+  const box = Array.isArray(bbox) && bbox.length === 4 ? bbox.map(Number) : null;
+  return (
+    <div className="relative h-full w-full">
+      <img src={fileUrl(url)} alt="" className="h-full w-full object-contain"
+        onLoad={(e) => setDims({ w: e.target.naturalWidth, h: e.target.naturalHeight })} />
+      {dims && box && (
+        <svg viewBox={`0 0 ${dims.w} ${dims.h}`} preserveAspectRatio="xMidYMid meet" className="absolute inset-0 h-full w-full pointer-events-none">
+          <rect x={box[0]} y={box[1]} width={box[2] - box[0]} height={box[3] - box[1]}
+            fill="none" stroke="#22c55e" strokeWidth={Math.max(2, dims.w / 320)} />
+        </svg>
+      )}
+    </div>
+  );
+}
+
+function Row({ label, children }) {
+  return <><dt className="text-muted">{label}</dt><dd className="text-foreground min-w-0 truncate">{children}</dd></>;
+}
+
+// Complete-info modal for a Live event (opened by clicking a card in the feed).
+function LiveEventModal({ event, onClose }) {
+  const e = event;
+  return (
+    <Modal open={!!e} onClose={onClose} title="Event details" wide>
+      {e && (
+        <div className="grid md:grid-cols-5 gap-4 items-stretch">
+          <div className="md:col-span-3 flex flex-col">
+            <div className="text-[10px] uppercase tracking-wider text-muted mb-1.5">Snapshot</div>
+            <div className="flex-1 min-h-[240px] rounded-lg bg-black/40 border border-card-border overflow-hidden flex items-center justify-center">
+              <SnapshotWithBox url={e.snapshot_url} bbox={e.bbox} />
+            </div>
+          </div>
+          <div className="md:col-span-2 flex flex-col">
+            <dl className="grid grid-cols-[92px_1fr] gap-x-3 gap-y-2 text-sm items-center">
+              <Row label="Type"><Badge color={EVENT_COLOR[e.event_type] || "slate"}>{TYPE_LABEL[e.event_type] || e.event_type}</Badge></Row>
+              <Row label="Person">{e.person_name || "Unknown"}</Row>
+              {e.group_name && <Row label="Group">{e.group_name}</Row>}
+              {e.authorized != null && (
+                <Row label="Access">
+                  <Badge color={e.authorized ? "green" : "red"}>{e.authorized ? "Authorized" : "Not authorized"}</Badge>
+                </Row>
+              )}
+              {!e.authorized && e.auth_reason && <Row label="Reason">{e.auth_reason}</Row>}
+              <Row label="Camera">{e.camera_name || "—"}</Row>
+              {e.direction && <Row label="Direction">{e.direction}</Row>}
+              {e.confidence != null && <Row label="Confidence"><span className={`text-${confColor(e.confidence)}-500`}>{pct(e.confidence)}</span></Row>}
+              {e.liveness_score != null && <Row label="Liveness">{pct(e.liveness_score)}</Row>}
+              {e.gender && <Row label="Gender">{e.gender}{e.gender_confidence != null ? ` (${pct(e.gender_confidence)})` : ""}</Row>}
+              {e.age_range && <Row label="Age">{e.age_range}</Row>}
+              {e.track_id && <Row label="Track">{e.track_id}</Row>}
+              <Row label="Time">{fmt(e.triggered_at)}</Row>
+            </dl>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 export default function LiveTab() {
   const [layout, setLayout] = useState(9);
   const [showFeed, setShowFeed] = useState(false);
   const [selectedCamId, setSelectedCamId] = useState("");
+  const [selectedEvent, setSelectedEvent] = useState(null);
   // Audio alerts: default ON (matches vizor_nvr). Ref mirror so the SSE handler
   // reads the latest value without re-subscribing.
   const [muted, setMuted] = useState(false);
@@ -688,15 +752,21 @@ export default function LiveTab() {
             ) : (
               <ul className="flex-1 min-h-0 overflow-y-auto divide-y divide-card-border">
                 {feed.map((e) => (
-                  <li key={e.id} className="flex items-center gap-2.5 px-3 py-2">
-                    <div className="h-9 w-9 rounded-md bg-black/40 overflow-hidden shrink-0 flex items-center justify-center">
-                      {e.snapshot_url ? <img src={fileUrl(e.snapshot_url)} alt="" className="h-full w-full object-cover" /> : <Icon icon="heroicons-outline:user" className="text-muted" />}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm text-foreground truncate">{e.person_name || TYPE_LABEL[e.event_type] || "Unknown"}</div>
-                      <div className="text-[11px] text-muted truncate">{e.camera_name || "—"} · {fmtTime(e.triggered_at)}</div>
-                    </div>
-                    {e.confidence != null && <span className={`text-[11px] tabular-nums text-${EVENT_COLOR[e.event_type] || "slate"}-500`}>{pct(e.confidence)}</span>}
+                  <li key={e.id}>
+                    <button type="button" onClick={() => setSelectedEvent(e)}
+                      className="w-full flex items-center gap-2.5 px-3 py-2 text-left hover:bg-hover transition cursor-pointer">
+                      <div className="h-9 w-9 rounded-md bg-black/40 overflow-hidden shrink-0 flex items-center justify-center">
+                        {e.snapshot_url ? <img src={fileUrl(e.snapshot_url)} alt="" className="h-full w-full object-cover" /> : <Icon icon="heroicons-outline:user" className="text-muted" />}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm text-foreground truncate">{e.person_name || TYPE_LABEL[e.event_type] || "Unknown"}</div>
+                        <div className="flex items-center gap-1.5 mt-0.5">
+                          <Badge color={EVENT_COLOR[e.event_type] || "slate"}>{TYPE_LABEL[e.event_type] || e.event_type}</Badge>
+                          <span className="text-[11px] text-muted truncate">{e.camera_name || "—"} · {fmtTime(e.triggered_at)}</span>
+                        </div>
+                      </div>
+                      {e.confidence != null && <span className={`text-[11px] tabular-nums text-${EVENT_COLOR[e.event_type] || "slate"}-500`}>{pct(e.confidence)}</span>}
+                    </button>
                   </li>
                 ))}
               </ul>
@@ -704,6 +774,8 @@ export default function LiveTab() {
           </div>
         )}
       </div>
+
+      <LiveEventModal event={selectedEvent} onClose={() => setSelectedEvent(null)} />
     </div>
   );
 }

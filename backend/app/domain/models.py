@@ -149,6 +149,11 @@ class Camera(Base):
     fps: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     # none | nvdec — hardware decode selection for the RTSP reader.
     hw_accel: Mapped[str] = mapped_column(String, nullable=False, default="none")
+    # Max width (px) frames are downscaled to for analysis; 0 = native resolution.
+    # With hw_accel=nvdec the resize runs on the GPU (scale_cuda) so the CPU never
+    # touches the full-res frame — the biggest CPU lever for high-MP cameras. The
+    # detector runs at 640x640 regardless, so ~1280-1920 loses no useful accuracy.
+    analyze_width: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Polygon regions of interest (list of {points:[[x,y],...]} in 0..1 coords).
     roi: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     # online | offline | error — maintained by the supervisor's health check.

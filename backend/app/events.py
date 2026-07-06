@@ -119,6 +119,7 @@ async def record_event(
     attributes: dict | None = None,
     triggered_at: dt.datetime | None = None,
     direction: str | None = None,   # "entry" | "exit" | "both"/None (per-camera)
+    embedding=None,                 # precomputed 512-d face vector (live pipeline)
 ) -> FRSEvent:
     from fastapi.concurrency import run_in_threadpool
 
@@ -190,7 +191,14 @@ async def record_event(
         key = f"frs/events/{ev.id.hex}.jpg"
         await get_storage().put(key, snapshot_bytes, snapshot_content_type or "image/jpeg")
         ev.snapshot_key = key
-        vec = await run_in_threadpool(enroll.embed_query, snapshot_bytes)
+        # Prefer the embedding the pipeline already computed for this face — the
+        # snapshot is a TIGHT crop, so re-detecting a face in it (embed_query) often
+        # fails and the forensic snapshots index stays empty (breaking Investigate).
+        # Fall back to a probe embed only when no vector was supplied (e.g. ingest).
+        if embedding is not None:
+            vec = embedding
+        else:
+            vec = await run_in_threadpool(enroll.embed_query, snapshot_bytes)
         if vec is not None:
             payload = {
                 "event_id": str(ev.id),
@@ -205,6 +213,7 @@ async def record_event(
                 "age_range": age_range,
                 "gender": gender,
                 "gender_confidence": gender_confidence,
+                "bbox": bbox or [],   # face box in the full-frame snapshot (client-side crop)
                 "frame_timestamp": ts_iso,
             }
             await run_in_threadpool(gallery.upsert_snapshot, str(ev.id), vec, payload)
@@ -228,7 +237,8 @@ async def record_event(
         try:
             await transit_engine.on_recognition(
                 db, person_id=person_id, person_name=person_name, camera_id=camera_id,
-                when=when, snapshot_key=ev.snapshot_key,
+                camera_name=ev.camera_name, when=when, snapshot_key=ev.snapshot_key,
+                bbox=ev.bbox, confidence=ev.confidence,
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("transit on_recognition raised: %s", exc)
@@ -244,7 +254,9 @@ async def record_event(
         "authorized": authorized,
         "auth_reason": auth_reason,
         "group_name": group_name,
-        "snapshot_url": ev.snapshot_key,
+        # Browser-usable path through the decrypting /files proxy (frontend fileUrl
+        # resolves this), not the raw storage key.
+        "snapshot_url": f"/files/{ev.snapshot_key}" if ev.snapshot_key else None,
         "bbox": ev.bbox,          # [x1,y1,x2,y2] pixels — drives the Live overlay box
         "triggered_at": ts_iso,
     })

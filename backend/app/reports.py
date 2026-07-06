@@ -53,7 +53,20 @@ def _fmt_duration(seconds: float | None) -> str:
     return f"{h}h {m}m"
 
 
-async def build(db: AsyncSession, report: str, day_from: str | None, day_to: str | None) -> dict:
+async def build(
+    db: AsyncSession,
+    report: str,
+    day_from: str | None,
+    day_to: str | None,
+    camera_ids: set | None = None,
+) -> dict:
+    """Build a report's tabular data.
+
+    ``camera_ids`` optionally scopes the report to a set of cameras (C12 per-camera
+    visibility). ``None`` means unrestricted (no filter). The filter is applied to
+    the reports that carry a camera column (attendance, unknown); group/mismatch have
+    no direct camera column and are unaffected.
+    """
     df, dt_, start, end = _range(day_from, day_to)
 
     # ── 1. Attendance: First-In, Last-Out, Duration (per person/day) ──────────
@@ -69,6 +82,8 @@ async def build(db: AsyncSession, report: str, day_from: str | None, day_to: str
             .where(and_(Attendance.day_key >= df.isoformat(), Attendance.day_key <= dt_.isoformat()))
             .order_by(Attendance.day_key.desc(), Person.full_name)
         )
+        if camera_ids is not None:
+            stmt = stmt.where(Attendance.camera_id.in_(camera_ids))
         items = []
         for day, pid, aname, fname, cin, cout, cin_snap, cout_snap in (await db.execute(stmt)).all():
             last = cout or cin
@@ -151,6 +166,8 @@ async def build(db: AsyncSession, report: str, day_from: str | None, day_to: str
                 FRSEvent.triggered_at >= start, FRSEvent.triggered_at <= end,
             )).order_by(FRSEvent.triggered_at.desc()).limit(2000)
         )
+        if camera_ids is not None:
+            stmt = stmt.where(FRSEvent.camera_id.in_(camera_ids))
         evs = (await db.execute(stmt)).scalars().all()
         items = []
         for e in evs:

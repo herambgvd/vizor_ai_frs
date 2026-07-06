@@ -146,6 +146,9 @@ class CameraWorker(threading.Thread):
         self._votes = None
         self._prev_centroid: dict[int, tuple[float, float, float]] = {}
         self._last_gc = 0.0
+        # Wall-clock of the last decoded frame — the supervisor watches this to flip a
+        # camera to "offline" when the stream stalls (no frames) and back to "online".
+        self.last_frame_at = time.time()
 
     def _ensure_pipeline(self) -> bool:
         """Build the per-camera ByteTracker + TrackVoteBuffer once. Returns False if
@@ -174,12 +177,19 @@ class CameraWorker(threading.Thread):
 
         c = self.camera
         log.info("camera worker start id=%s name=%s fps=%s", c.id, c.name, c.fps)
-        reader = RTSPReader(c.rtsp_url, fps=max(1, int(c.fps or self._live_fps)), reconnect=True)
+        reader = RTSPReader(
+            c.rtsp_url,
+            fps=max(1, int(c.fps or self._live_fps)),
+            reconnect=True,
+            hw_accel=getattr(c, "hw_accel", "none") or "none",
+            max_width=int(getattr(c, "analyze_width", 0) or 0),
+        )
         got_frame = False
         try:
             for frame in reader.frames():
                 if self._stop.is_set():
                     break
+                self.last_frame_at = time.time()   # liveness heartbeat for the supervisor
                 if not got_frame:  # first decoded frame => camera is confirmed online
                     got_frame = True
                     self._set_status("online")
@@ -191,9 +201,16 @@ class CameraWorker(threading.Thread):
                 except Exception as exc:  # noqa: BLE001 — never let one bad frame kill the worker
                     log.warning("recognise failed cam=%s err=%s", c.id, exc)
                     continue
-                for f in faces:
-                    ok, buf = cv2.imencode(".jpg", f.crop_bgr)
+                # Snapshot = the FULL frame (scene context), encoded ONCE per frame and
+                # shared by every face in it — the operator sees where the person is,
+                # not a redundant face crop. Kept at native resolution so the stored
+                # (native-pixel) bbox maps 1:1 onto it for the client-side detected-face
+                # crop + box overlay. JPEG q85 bounds the size.
+                snapshot = None
+                if faces:
+                    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
                     snapshot = buf.tobytes() if ok else None
+                for f in faces:
                     asyncio.run_coroutine_threadsafe(self._persist(f, snapshot), self.loop)
         except Exception as exc:  # noqa: BLE001
             log.warning("camera worker error id=%s err=%s", c.id, exc)
@@ -257,10 +274,11 @@ class CameraWorker(threading.Thread):
             if face_sharpness(crop_face(frame, bbox, w, h)) < self._live_min_sharpness:
                 continue
             lms = np.asarray(d.kps, dtype=np.float32) if d.kps is not None else None
-            # Only pose-gate on trustworthy landmarks (degenerate SCRFD points would
-            # give a garbage pose and wrongly reject a recognisable face — YuNet in
-            # align_face recovers geometry downstream).
-            if lms is not None and float(lms.sum()) != 0.0 and _landmarks_sane(lms, bbox):
+            # Sane 5-point face geometry. Real faces have it; SCRFD false positives on
+            # non-faces (shoes, boxes) collapse the landmarks. Used to pose-gate AND to
+            # suppress bogus "Unknown" events below.
+            lms_sane = lms is not None and float(lms.sum()) != 0.0 and _landmarks_sane(lms, bbox)
+            if lms_sane:
                 yaw, pitch, roll = estimate_pose_from_landmarks(lms)
                 if max(abs(yaw), abs(pitch), abs(roll)) > self._live_max_pose_deg:
                     continue
@@ -274,8 +292,8 @@ class CameraWorker(threading.Thread):
                 s = float(hit.get("score", 0.0))
                 if s >= self._min_conf and hit.get("person_id") and s > mscore:
                     pid, pname, mscore = str(hit["person_id"]), hit.get("person_name"), s
-            prepped.append({"bbox": bbox, "conf": float(d.score), "vec": vec,
-                            "pid": pid, "pname": pname, "mscore": mscore})
+            prepped.append({"bbox": bbox, "conf": float(d.score), "vec": vec, "det": d,
+                            "pid": pid, "pname": pname, "mscore": mscore, "lms_sane": lms_sane})
 
         if not prepped:
             return []
@@ -314,11 +332,20 @@ class CameraWorker(threading.Thread):
             if consensus is None:
                 continue
             cpid, cscore, _emb, cname = consensus
-            event_type = "face_recognized" if cpid else "face_unknown"
+            if self._detection_only:
+                # Detection-only camera: report a face was present, don't identify it.
+                event_type = "face_detected"
+                cpid = cname = None
+                cscore = 0.0
+            else:
+                event_type = "face_recognized" if cpid else "face_unknown"
 
-            # False-positive gate for UNKNOWN events: require a higher detection
-            # confidence to emit an unknown than to detect. Recognised faces exempt.
-            if not cpid and p["conf"] < self._live_unknown_min_det_conf:
+            # False-positive gate for non-identified events (UNKNOWN / DETECTED): require a higher detection
+            # confidence AND sane face landmarks to emit an unknown. SCRFD sometimes
+            # fires confidently on non-faces (shoes, boxes) that never match the
+            # gallery — those have degenerate landmarks and would otherwise spam
+            # "Unknown". Recognised faces matched the gallery, so they're exempt.
+            if not cpid and (p["conf"] < self._live_unknown_min_det_conf or not p.get("lms_sane")):
                 continue
 
             prior_status = tstate.get("status") if tstate else None
@@ -336,19 +363,53 @@ class CameraWorker(threading.Thread):
             if not should_fire:
                 continue
 
-            # Per-identity cooldown so a lingering face doesn't spam events.
-            key = cpid or "__unknown__"
+            # Cooldown so a lingering face doesn't spam events. Keyed by identity when
+            # recognised, else per-track (so distinct unknown/detected people each get
+            # an event rather than one global anonymous cooldown).
+            key = cpid or f"__anon__{tid}"
             if now - self._cooldown.get(key, 0) < self._cooldown_seconds:
                 continue
             self._cooldown[key] = now
 
             x1, y1, x2, y2 = (int(v) for v in bbox)
             crop = crop_face_with_margin(frame, bbox, w, h)
-            out.append(LiveFace(
+            lf = LiveFace(
                 event_type, [x1, y1, x2, y2],
                 round(float(cscore), 4) if cpid else None,
                 cpid, cname, None, crop,
-            ))
+                # Carry the already-computed embedding so record_event indexes it
+                # straight into the forensic snapshots collection (re-detecting a
+                # face in the tight crop fails → Investigate would find nothing).
+                _emb if _emb is not None else p["vec"],
+            )
+            # Liveness / anti-spoof gate. When enabled on the camera, score the crop;
+            # a live-probability below the camera threshold flags a presentation attack
+            # (printed photo / phone screen) → emit spoof_detected instead of the
+            # recognition, and drop the identity (a spoof isn't a real sighting).
+            if self._liveness_enabled:
+                try:
+                    live_p = eng.liveness(frame, p["det"])
+                except Exception:  # noqa: BLE001
+                    live_p = None
+                if live_p is not None:
+                    lf.liveness_score = round(float(live_p), 4)
+                    if live_p < self._liveness_threshold:
+                        lf.event_type = "spoof_detected"
+                        lf.person_id = lf.person_name = None
+                        lf.confidence = None
+            # Demographics (age/gender via FairFace) — computed once here, only on an
+            # emitted event (post-consensus), not every frame, to bound GPU cost.
+            try:
+                demo = eng.age_gender(frame, p["det"])
+            except Exception:  # noqa: BLE001
+                demo = None
+            if demo:
+                a = demo.get("age")
+                lf.age = str(a) if a is not None else None
+                lf.age_range = demo.get("age_range")
+                lf.gender = demo.get("gender")
+                lf.gender_confidence = demo.get("gender_confidence")
+            out.append(lf)
         return out
 
     async def _persist(self, f, snapshot: bytes | None) -> None:
@@ -370,6 +431,11 @@ class CameraWorker(threading.Thread):
                     snapshot_content_type="image/jpeg",
                     liveness_score=f.liveness_score,
                     direction=getattr(c, "direction", None) or "both",
+                    embedding=getattr(f, "embedding", None),
+                    age=getattr(f, "age", None),
+                    age_range=getattr(f, "age_range", None),
+                    gender=getattr(f, "gender", None),
+                    gender_confidence=getattr(f, "gender_confidence", None),
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning("event persist failed cam=%s err=%s", c.id, exc)
@@ -414,6 +480,7 @@ def _cfg_sig(cam) -> str:
             "dwell_min_frames": getattr(cam, "dwell_min_frames", None),
             "alert_suppress_seconds": getattr(cam, "alert_suppress_seconds", None),
             "hw_accel": getattr(cam, "hw_accel", None),
+            "analyze_width": getattr(cam, "analyze_width", None),
             "roi": getattr(cam, "roi", None),
         },
         sort_keys=True,
@@ -444,10 +511,40 @@ async def _load_cameras():
                 "min_face_px": c.min_face_px, "min_sharpness": c.min_sharpness,
                 "max_pose_deg": c.max_pose_deg, "dwell_min_frames": c.dwell_min_frames,
                 "alert_suppress_seconds": c.alert_suppress_seconds, "hw_accel": c.hw_accel,
+                "analyze_width": c.analyze_width,
                 "roi": c.roi,
             })()
             for c in rows
         ]
+
+
+async def _mark_status(cam_id, cam_name: str, status: str) -> None:
+    """Persist a camera's online/offline state and raise an in-app notification
+    (bell) for every active operator on the transition."""
+    from sqlalchemy import select
+
+    from .domain.models import Camera
+
+    async with get_sessionmaker()() as db:
+        cam = await db.get(Camera, cam_id)
+        if cam is not None:
+            cam.status = status
+            cam.last_error = "stream unreachable" if status == "offline" else None
+            await db.commit()
+        try:
+            from edge.auth.models import User
+            from edge.messaging.dispatcher import notify
+
+            uids = (await db.execute(select(User.id).where(User.is_active.is_(True)))).scalars().all()
+            if uids:
+                offline = status == "offline"
+                await notify(
+                    db, user_ids=list(uids),
+                    title=f"Camera {'offline' if offline else 'back online'}",
+                    body=f"{cam_name} {'is offline — no video stream received.' if offline else 'is online again.'}",
+                )
+        except Exception as exc:  # noqa: BLE001 — never let a notify failure break the loop
+            log.warning("camera-status notify failed cam=%s: %s", cam_id, exc)
 
 
 async def supervise() -> None:
@@ -455,6 +552,8 @@ async def supervise() -> None:
     loop = asyncio.get_running_loop()
     workers: dict[str, CameraWorker] = {}
     sigs: dict[str, str] = {}
+    offline_state: dict[str, bool] = {}   # cid -> currently flagged offline
+    offline_after = _envf("FRS_OFFLINE_SECONDS", 45.0)
     log.info("FRS stream supervisor started")
     while True:
         try:
@@ -483,6 +582,21 @@ async def supervise() -> None:
                 w.start()
                 workers[cid] = w
                 sigs[cid] = _cfg_sig(cam)
+
+        # ── Offline watchdog: no decoded frame for `offline_after`s → flip the camera
+        # to "offline" (+ notify once); frames resuming flips it back to "online". ──
+        now = time.time()
+        for cid, w in list(workers.items()):
+            stale = (now - getattr(w, "last_frame_at", now)) > offline_after
+            if stale and not offline_state.get(cid):
+                offline_state[cid] = True
+                await _mark_status(w.camera.id, getattr(w.camera, "name", "Camera"), "offline")
+            elif not stale and offline_state.get(cid):
+                offline_state[cid] = False
+                await _mark_status(w.camera.id, getattr(w.camera, "name", "Camera"), "online")
+        for cid in list(offline_state):        # forget workers that were removed
+            if cid not in workers:
+                offline_state.pop(cid, None)
 
         if not workers:
             log.info("no cameras with the scenario on; idling")

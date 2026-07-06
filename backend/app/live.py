@@ -34,6 +34,11 @@ class LiveFace:
     person_name: str | None
     liveness_score: float | None
     crop_bgr: object           # np.ndarray face crop (BGR) for the snapshot
+    embedding: object = None   # 512-d face embedding (for forensic snapshot indexing)
+    age: str | None = None
+    age_range: str | None = None
+    gender: str | None = None
+    gender_confidence: float | None = None
 
 
 def recognize_frame(bgr, *, min_confidence: float = 0.45, min_face_px: int = 40) -> list[LiveFace]:

@@ -21,17 +21,20 @@ export default function InvestigateTab() {
   const [meta, setMeta] = useState(null);
   const [detail, setDetail] = useState(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [dragOver, setDragOver] = useState(false);
 
   const jobs = useQuery({ queryKey: ["frs-investigations"], queryFn: () => api.get("/frs/investigations").then((r) => r.data.items) });
 
   const search = useMutation({
-    mutationFn: () => { const fd = new FormData(); fd.append("file", file); fd.append("min_score", String(minScore)); fd.append("top_k", String(maxResults)); return api.post("/frs/investigate", fd).then((r) => r.data); },
+    mutationFn: () => { const fd = new FormData(); fd.append("file", file); fd.append("min_score", String(minScore)); fd.append("top_k", String(maxResults)); fd.append("name", name); return api.post("/frs/investigate", fd).then((r) => r.data); },
     onSuccess: (data) => { setHits(data.hits || []); setMeta({ total: data.total, min: minScore }); qc.invalidateQueries({ queryKey: ["frs-investigations"] }); if (data.error) toast.error(data.error); },
     onError: (e) => toast.error(apiError(e)),
   });
 
-  function onPick(e) { const f = e.target.files?.[0]; e.target.value = ""; if (!f) return; setFile(f); setPreview(URL.createObjectURL(f)); setHits(null); }
-  function reset() { setFile(null); setPreview(null); setHits(null); setMeta(null); }
+  function accept(f) { if (!f) return; if (!f.type?.startsWith("image/")) { toast.error("Please choose an image file"); return; } setFile(f); setPreview(URL.createObjectURL(f)); setHits(null); }
+  function onPick(e) { const f = e.target.files?.[0]; e.target.value = ""; accept(f); }
+  function reset() { setFile(null); setPreview(null); setHits(null); setMeta(null); setName(""); }
 
   async function loadJob(id) {
     try { const { data } = await api.get(`/frs/investigations/${id}`); setHits(data.results || []); setMeta({ total: data.result_count, min: data.similarity_threshold }); setPreview(null); setFile(null); setHistoryOpen(false); }
@@ -46,7 +49,12 @@ export default function InvestigateTab() {
           <span className="text-sm font-semibold text-foreground">Query face</span>
           <button onClick={() => setHistoryOpen(true)} className="text-xs text-muted hover:text-foreground flex items-center gap-1"><Icon icon="heroicons-outline:clock" /> History</button>
         </div>
-        <div onClick={() => fileRef.current?.click()} className="relative aspect-square rounded-lg border border-dashed border-card-border bg-hover/30 flex items-center justify-center cursor-pointer overflow-hidden hover:border-muted transition">
+        <div
+          onClick={() => fileRef.current?.click()}
+          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={(e) => { e.preventDefault(); setDragOver(false); accept(e.dataTransfer.files?.[0]); }}
+          className={`relative aspect-square rounded-lg border border-dashed bg-hover/30 flex items-center justify-center cursor-pointer overflow-hidden transition ${dragOver ? "border-primary bg-primary/10" : "border-card-border hover:border-muted"}`}>
           {preview ? (
             <>
               {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -58,6 +66,11 @@ export default function InvestigateTab() {
           )}
         </div>
         <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={onPick} />
+        <div>
+          <span className="block text-xs text-muted mb-1">Name <span className="opacity-60">(optional)</span></span>
+          <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Lobby intruder — Jul 6"
+            className="w-full rounded-md border border-card-border bg-transparent px-3 py-2 text-sm text-foreground placeholder:text-muted outline-none focus:border-muted" />
+        </div>
         <div>
           <div className="flex items-center justify-between text-xs text-muted mb-1"><span>Similarity</span><span>{minScore.toFixed(2)}</span></div>
           <input type="range" min="0.3" max="0.95" step="0.01" value={minScore} onChange={(e) => setMinScore(Number(e.target.value))} className="w-full accent-foreground" />
@@ -131,9 +144,12 @@ export default function InvestigateTab() {
         {!jobs.data?.length ? <EmptyState icon="heroicons-outline:clock" title="No investigations yet" /> : (
           <ul className="divide-y divide-card-border">
             {jobs.data.map((j) => (
-              <li key={j.id}><button onClick={() => loadJob(j.id)} className="w-full text-left py-3 flex items-center justify-between hover:text-foreground">
-                <span className="text-sm text-muted">{fmt(j.created_at)}</span>
-                <Badge color={j.status === "done" ? "green" : "amber"}>{j.result_count} hits</Badge>
+              <li key={j.id}><button onClick={() => loadJob(j.id)} className="w-full text-left py-3 flex items-center justify-between gap-2 hover:bg-hover/40 px-1 rounded">
+                <div className="min-w-0">
+                  <div className="text-sm text-foreground truncate">{j.name || "Investigation"}</div>
+                  <div className="text-[11px] text-muted">{fmt(j.created_at)}</div>
+                </div>
+                <Badge color={j.status === "done" ? "green" : j.status === "failed" ? "red" : "amber"}>{j.result_count} hits</Badge>
               </button></li>
             ))}
           </ul>

@@ -55,6 +55,8 @@ class RTSPReader:
         height: int | None = None,
         reconnect: bool = True,
         transport: str = "tcp",
+        hw_accel: str = "none",
+        max_width: int = 0,
     ) -> None:
         """
         Args:
@@ -66,6 +68,18 @@ class RTSPReader:
             reconnect: when True, transparently respawn FFmpeg with exponential
                 backoff after a read failure / EOF instead of ending the iterator.
             transport: RTSP lower-transport — "tcp" (reliable, default) or "udp".
+            hw_accel: decode backend — "none" (CPU/software, default) or "nvdec"
+                to offload H.264/H.265 decode to the GPU's NVDEC engine via
+                FFmpeg ``-hwaccel cuda``. NVDEC decodes on-GPU then downloads the
+                frame to system memory, so we still receive plain ``bgr24`` bytes
+                — the only change is that the (expensive) decode no longer burns
+                CPU. Requires the container to have GPU access + an FFmpeg built
+                with CUDA (both true for our streams image).
+            max_width: if > 0 and the source is wider, downscale analysis frames to
+                this width (aspect preserved). With hw_accel="nvdec" the resize runs
+                on the GPU (``scale_cuda``) so the CPU never sees the full-res frame;
+                otherwise it's an FFmpeg CPU ``scale`` (still cheaper than resizing
+                every frame downstream). 0 = keep native resolution.
         """
         self.url = url
         self.fps = fps
@@ -73,6 +87,12 @@ class RTSPReader:
         self.height = height
         self.reconnect = reconnect
         self.transport = transport
+        self.hw_accel = (hw_accel or "none").strip().lower()
+        self.max_width = int(max_width or 0)
+        # Probed source geometry. self.width/height hold the *output* geometry
+        # (post-downscale) because that's what we slice out of the pipe.
+        self._src_w: int | None = None
+        self._src_h: int | None = None
 
         # The live FFmpeg child process (None until first spawn / after close).
         self._proc: subprocess.Popen[bytes] | None = None
@@ -138,23 +158,61 @@ class RTSPReader:
         stderr is routed to DEVNULL so FFmpeg's verbose banner doesn't spam us;
         flip to subprocess.PIPE while debugging a stream that won't open.
         """
-        # Ensure we know the frame geometry (probe once, lazily).
-        if self.width is None or self.height is None:
-            self.width, self.height = self._probe_dimensions()
+        # Resolve source geometry (probe once, lazily) unless the caller pinned
+        # explicit dims and asked for no downscale — then we trust those as source.
+        if self._src_w is None or self._src_h is None:
+            if self.width is not None and self.height is not None and self.max_width <= 0:
+                self._src_w, self._src_h = self.width, self.height
+            else:
+                self._src_w, self._src_h = self._probe_dimensions()
 
-        cmd = [
-            "ffmpeg",
+        # Decide the *output* (analysis) geometry. If a max width is set and the
+        # source is wider, downscale to it (aspect preserved, even dims for yuv).
+        out_w, out_h = self._src_w, self._src_h
+        do_scale = self.max_width > 0 and self._src_w > self.max_width
+        if do_scale:
+            out_w = self.max_width - (self.max_width % 2)
+            out_h = int(round(self._src_h * out_w / self._src_w))
+            out_h -= out_h % 2
+        # self.width/height must reflect what we actually read off the pipe.
+        self.width, self.height = out_w, out_h
+
+        cmd = ["ffmpeg"]
+        # NVDEC hardware decode: -hwaccel cuda must come BEFORE -i so it applies to
+        # the input decoder. When we ALSO downscale, keep frames on the GPU
+        # (-hwaccel_output_format cuda) so scale_cuda can resize them there; the
+        # small result is then hwdownload'ed to system memory. When not downscaling
+        # we let FFmpeg auto-download full frames (no output-format flag needed).
+        if self.hw_accel == "nvdec":
+            cmd += ["-hwaccel", "cuda"]
+            if do_scale:
+                cmd += ["-hwaccel_output_format", "cuda"]
+        cmd += [
             "-rtsp_transport", self.transport,
             "-i", self.url,
         ]
         if self.fps is not None:
             cmd += ["-r", str(self.fps)]
+        if do_scale:
+            if self.hw_accel == "nvdec":
+                # Resize on the GPU, then bring the small frame down to CPU memory.
+                # hwdownload can only emit the CUDA surface's native format (nv12),
+                # so download as nv12 first, then convert nv12->bgr24 on the CPU (a
+                # cheap op on the already-small frame). Downloading straight to bgr24
+                # fails with "Invalid output format bgr24 for hwframe download".
+                cmd += ["-vf", f"scale_cuda={out_w}:{out_h},hwdownload,format=nv12,format=bgr24"]
+            else:
+                # Software decode path: cheap FFmpeg swscale resize on the CPU.
+                cmd += ["-vf", f"scale={out_w}:{out_h}"]
         cmd += [
             "-f", "rawvideo",
             "-pix_fmt", "bgr24",
             "-",
         ]
-        log.info("spawning ffmpeg for %s (%dx%d)", self.url, self.width, self.height)
+        log.info(
+            "spawning ffmpeg for %s src=%dx%d out=%dx%d hw_accel=%s scale=%s",
+            self.url, self._src_w, self._src_h, out_w, out_h, self.hw_accel, do_scale,
+        )
         # bufsize=0: we manage buffering ourselves via read(exact_bytes).
         return subprocess.Popen(
             cmd,

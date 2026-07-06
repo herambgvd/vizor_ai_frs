@@ -8,7 +8,7 @@ import { toast } from "sonner";
 import { Badge, Button, ConfirmDialog, EmptyState, Input, Modal, Select, Spinner, Toggle } from "@/web/kit";
 import { api, apiError, fileUrl } from "@/web/api";
 
-import { CAM_DIRECTIONS, CAM_HWACCEL, CAM_STATUS_COLOR } from "./shared";
+import { CAM_ANALYZE_RES, CAM_DIRECTIONS, CAM_HWACCEL, CAM_STATUS_COLOR } from "./shared";
 
 const round = (n) => Number(n.toFixed(4));
 
@@ -89,6 +89,7 @@ function draftOf(c) {
     dwell_min_frames: c.dwell_min_frames ?? 3,
     alert_suppress_seconds: c.alert_suppress_seconds ?? 300,
     fps: c.fps ?? 10,
+    analyze_width: c.analyze_width ?? 0,
     roi: Array.isArray(c.roi) ? c.roi : [],
   };
 }
@@ -138,7 +139,7 @@ function CameraConfigPanel({ camera, qc, onDeleted }) {
     "rtsp_url", "fps", "min_confidence", "detection_enabled", "direction",
     "liveness_enabled", "liveness_threshold", "det_conf", "min_face_px",
     "min_sharpness", "max_pose_deg", "dwell_min_frames", "alert_suppress_seconds",
-    "hw_accel", "roi",
+    "hw_accel", "analyze_width", "roi",
   ];
   const willRestart = draft.recognition_enabled && dirty && RESTART_KEYS.some((k) => JSON.stringify(draft[k]) !== JSON.stringify(base[k]));
 
@@ -153,6 +154,7 @@ function CameraConfigPanel({ camera, qc, onDeleted }) {
       min_face_px: Number(draft.min_face_px), min_sharpness: Number(draft.min_sharpness),
       max_pose_deg: Number(draft.max_pose_deg), dwell_min_frames: Number(draft.dwell_min_frames),
       alert_suppress_seconds: Number(draft.alert_suppress_seconds), fps: Number(draft.fps),
+      analyze_width: Number(draft.analyze_width),
       roi: Array.isArray(draft.roi) ? draft.roi : [],
     });
   }
@@ -232,6 +234,11 @@ function CameraConfigPanel({ camera, qc, onDeleted }) {
                 hint="Frames analysed per second. 10+ recommended — more frames = faster events + steadier recognition." />
               <Select label="Decode" options={CAM_HWACCEL} value={draft.hw_accel} onChange={(e) => set("hw_accel", e.target.value)} />
             </div>
+            <Select label="Analyze resolution" options={CAM_ANALYZE_RES} value={String(draft.analyze_width)} onChange={(e) => set("analyze_width", Number(e.target.value))} />
+            <p className="text-xs text-muted">
+              High-resolution cameras are downscaled for analysis to save CPU — with Decode = NVDEC the resize runs on the GPU.
+              The detector is unaffected; 720p–1080p keeps full recognition quality for room-scale cameras.
+            </p>
           </section>
 
           <div className="flex items-center justify-between rounded-md border border-card-border px-3 py-2.5">

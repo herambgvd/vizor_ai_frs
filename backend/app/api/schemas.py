@@ -167,6 +167,7 @@ class CameraCreate(BaseModel):
     alert_suppress_seconds: int = Field(300, ge=0, le=3600)
     fps: int = Field(10, ge=1, le=15)
     hw_accel: str = "none"         # none | nvdec
+    analyze_width: int = Field(0, ge=0, le=3840)   # 0 = native; else downscale cap
     roi: list = []
 
 
@@ -190,6 +191,7 @@ class CameraUpdate(BaseModel):
     alert_suppress_seconds: int | None = Field(None, ge=0, le=3600)
     fps: int | None = Field(None, ge=1, le=15)
     hw_accel: str | None = None
+    analyze_width: int | None = Field(None, ge=0, le=3840)
     roi: list | None = None
 
 
@@ -215,6 +217,7 @@ class CameraOut(BaseModel):
     alert_suppress_seconds: int
     fps: int
     hw_accel: str
+    analyze_width: int
     roi: list
     status: str
     last_seen_at: dt.datetime | None
