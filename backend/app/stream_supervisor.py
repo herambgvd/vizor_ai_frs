@@ -149,6 +149,12 @@ class CameraWorker(threading.Thread):
         # Wall-clock of the last decoded frame — the supervisor watches this to flip a
         # camera to "offline" when the stream stalls (no frames) and back to "online".
         self.last_frame_at = time.time()
+        # When this worker (re)started, and whether it has EVER produced a frame. The
+        # offline watchdog uses these to avoid false "offline" alerts during the normal
+        # connect window right after a (re)start — ffprobe + RTSP handshake + first
+        # decode can take several seconds, and a config-change restart is routine.
+        self.started_at = time.time()
+        self.got_first_frame = False
 
     def _ensure_pipeline(self) -> bool:
         """Build the per-camera ByteTracker + TrackVoteBuffer once. Returns False if
@@ -190,6 +196,7 @@ class CameraWorker(threading.Thread):
                 if self._stop.is_set():
                     break
                 self.last_frame_at = time.time()   # liveness heartbeat for the supervisor
+                self.got_first_frame = True        # unblocks the offline watchdog
                 if not got_frame:  # first decoded frame => camera is confirmed online
                     got_frame = True
                     self._set_status("online")
@@ -554,6 +561,10 @@ async def supervise() -> None:
     sigs: dict[str, str] = {}
     offline_state: dict[str, bool] = {}   # cid -> currently flagged offline
     offline_after = _envf("FRS_OFFLINE_SECONDS", 45.0)
+    # Grace window after a worker (re)starts before it can be judged offline. Covers
+    # ffprobe + RTSP handshake + first decode (and NVDEC init), so a routine
+    # config-change restart never emits a spurious "camera offline" alert.
+    startup_grace = _envf("FRS_OFFLINE_STARTUP_SECONDS", 90.0)
     log.info("FRS stream supervisor started")
     while True:
         try:
@@ -587,7 +598,14 @@ async def supervise() -> None:
         # to "offline" (+ notify once); frames resuming flips it back to "online". ──
         now = time.time()
         for cid, w in list(workers.items()):
-            stale = (now - getattr(w, "last_frame_at", now)) > offline_after
+            if getattr(w, "got_first_frame", False):
+                # Streaming worker: offline only after a real stall in the feed.
+                stale = (now - getattr(w, "last_frame_at", now)) > offline_after
+            else:
+                # Still connecting for the first time (fresh/restarted worker):
+                # don't judge until the startup grace elapses — otherwise a routine
+                # restart or a slow RTSP handshake looks like an outage.
+                stale = (now - getattr(w, "started_at", now)) > startup_grace
             if stale and not offline_state.get(cid):
                 offline_state[cid] = True
                 await _mark_status(w.camera.id, getattr(w.camera, "name", "Camera"), "offline")

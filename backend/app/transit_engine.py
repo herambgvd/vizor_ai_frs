@@ -230,6 +230,8 @@ async def _emit_overdue_event(db, f: dict, now: dt.datetime) -> None:
         person_id=f.get("person_id"),
         person_name=person_name,
         camera_id=_as_uuid(f.get("entry_camera")),
+        camera_name=f.get("entry_camera_name"),
+        confidence=f.get("entry_confidence"),
         snapshot_key=f.get("entry_snapshot"),
         bbox=f.get("entry_bbox") or [],
         triggered_at=now,
