@@ -23,6 +23,7 @@ def _metadata():
     import edge.messaging  # noqa: F401
     import edge.branding.models  # noqa: F401
     import edge.reports.models  # noqa: F401
+    import edge.settings.models  # noqa: F401 — app_settings (public settings / flags)
     import app.domain.models  # noqa: F401 — FRS domain tables
     return Base.metadata
 

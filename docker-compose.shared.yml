@@ -1,0 +1,74 @@
+# FRS — SHARED-INFRA mode. App services only; Postgres/Redis/Qdrant/RustFS/
+# MediaMTX come from the shared `vizor-infra` stack (run it first). This scenario
+# joins the external `vizor_shared` network and reaches those services by their
+# stable hostnames (vizor-postgres, vizor-redis, …) via .env.shared.
+#
+#   cd ../vizor_ai_platform/vizor-infra && docker compose up -d   # once per host
+#   cp .env.shared.example .env.shared                            # here, in this repo
+#   docker compose -f docker-compose.shared.yml --env-file .env.shared up -d --build
+#
+# Host ports: FRS is port-index 0 → backend 8000, frontend 3000.
+name: frs
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    env_file: .env.shared
+    ports: ["8000:8000"]
+    networks: [vizor_shared]
+    volumes:
+      - ./platform:/edge
+      - ./backend:/app
+    # Create this scenario's DB on the shared server, migrate, then serve.
+    command: >
+      bash -c "python scripts/ensure_db.py &&
+               alembic upgrade head &&
+               uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+  worker:
+    build: { context: ., dockerfile: backend/Dockerfile }
+    restart: unless-stopped
+    env_file: .env.shared
+    networks: [vizor_shared]
+    volumes: ["./platform:/edge", "./backend:/app"]
+    command: celery -A edge.tasks.app.celery_app worker -l info
+
+  beat:
+    build: { context: ., dockerfile: backend/Dockerfile }
+    restart: unless-stopped
+    env_file: .env.shared
+    networks: [vizor_shared]
+    volumes: ["./platform:/edge", "./backend:/app"]
+    command: celery -A edge.tasks.app.celery_app beat -l info
+
+  # Live FRS recognition supervisor. Off by default (profile "live") — needs real
+  # RTSP cameras. Enable with:
+  #   docker compose -f docker-compose.shared.yml --env-file .env.shared --profile live up -d streams
+  streams:
+    profiles: ["live"]
+    build: { context: ., dockerfile: backend/Dockerfile }
+    restart: unless-stopped
+    env_file: .env.shared
+    networks: [vizor_shared]
+    volumes: ["./platform:/edge", "./backend:/app"]
+    command: python -m app.stream_supervisor
+
+  frontend:
+    build: { context: ./frontend, dockerfile: Dockerfile }
+    restart: unless-stopped
+    environment:
+      WATCHPACK_POLLING: "true"
+    ports: ["3000:3000"]
+    networks: [vizor_shared]
+    depends_on: [backend]
+    volumes:
+      - ./frontend:/app
+      - ./platform/web:/app/web
+      - /app/node_modules
+
+networks:
+  vizor_shared:
+    external: true

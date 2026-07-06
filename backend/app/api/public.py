@@ -7,19 +7,25 @@ lobby screen.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+import json
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from edge.core.errors import NotFoundError
-from edge.db.base import get_db
+from edge.db.base import get_db, get_sessionmaker
 
-from .. import settings_store
+from .. import events as events_bus, settings_store
 from ..domain.models import FRSEvent
 
 router = APIRouter(prefix="/frs/public", tags=["frs-public"])
+
+# Keepalive cadence (seconds) — see app.api.live for rationale.
+_SSE_KEEPALIVE_S = 15
 
 
 @router.get("/dashboard")
@@ -67,3 +73,57 @@ async def public_live(db: AsyncSession = Depends(get_db)) -> dict:
             for e in rows
         ]
     }
+
+
+@router.get("/stream")
+async def public_stream(request: Request) -> StreamingResponse:
+    """UNAUTHENTICATED realtime SSE feed for the public lobby dashboard.
+
+    Same in-process event bus as the authenticated Live wall, but every frame is cut
+    down to the public-safe subset: type / camera / authorized / group and — only when
+    ``public_show_names`` is on — the person name. Never emits snapshots, person ids,
+    or the internal ``auth_reason``. Gated by ``public_dashboard_enabled`` (404 when
+    off, so the surface simply doesn't exist). Sends ``: keepalive`` every ~15s and
+    unsubscribes on disconnect.
+    """
+    async with get_sessionmaker()() as db:  # short-lived — settings read at connect
+        row = await settings_store.get_settings_row(db)
+        enabled = bool(row.public_dashboard_enabled)
+        show_names = bool(row.public_show_names)
+    if not enabled:
+        raise NotFoundError("public dashboard is disabled")
+
+    q = events_bus.subscribe()
+
+    def _safe(item: dict) -> dict:
+        # Aggregate-safe projection: no snapshot_url, no person_id, no auth_reason.
+        return {
+            "id": item.get("id"),
+            "event_type": item.get("event_type"),
+            "camera_id": item.get("camera_id"),
+            "camera_name": item.get("camera_name"),
+            "person_name": (item.get("person_name") if show_names else None),
+            "authorized": item.get("authorized"),
+            "group_name": item.get("group_name"),
+            "triggered_at": item.get("triggered_at"),
+        }
+
+    async def _gen():
+        try:
+            yield ": connected\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    item = await asyncio.wait_for(q.get(), timeout=_SSE_KEEPALIVE_S)
+                    yield f"data: {json.dumps(_safe(item))}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            events_bus.unsubscribe(q)
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )

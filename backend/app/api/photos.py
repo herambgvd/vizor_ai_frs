@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from edge.auth.deps import require_permission
 from edge.core.audit import record as audit_record
 from edge.core.errors import NotFoundError
-from edge.core.storage import get_storage
+from edge.core.storage import _dec, get_storage
 from edge.db.base import get_db
 
 from .. import enroll, gallery
@@ -148,7 +148,9 @@ async def retry_photo(
     if photo is None:
         raise NotFoundError("photo not found")
     person = await db.get(Person, photo.person_id)
-    data = await get_storage().get(photo.storage_key)
+    # Stored face media is encrypted at rest (frs/ prefix); S3 get() returns the
+    # ciphertext, so decrypt before handing raw JPEG bytes to the decoder.
+    data = _dec(photo.storage_key, await get_storage().get(photo.storage_key))
     await run_in_threadpool(gallery.delete_by_point_key, str(photo_id))
     result = await run_in_threadpool(
         enroll.enroll_photo, data, person_id=photo.person_id, photo_id=photo_id,

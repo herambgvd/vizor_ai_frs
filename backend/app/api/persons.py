@@ -270,35 +270,83 @@ async def delete_person(
     db: AsyncSession = Depends(get_db),
     actor=Depends(require_permission(FrsPerm.PERSON_MANAGE)),
 ) -> None:
-    """Right-to-erasure. Deletes the person + their face photos (blobs + gallery
-    embeddings) + ID document. Extended to purge events + attendance as those
-    features land."""
+    """Right-to-erasure (GDPR/DPDP). Erases EVERY trace of a person's biometrics —
+    mirrors vizor_nvr ``purge_person_biometrics``:
+
+      * gallery vectors (enrolled-face embeddings) — ``gallery.delete_by_person``
+      * live-sighting / snapshot vectors — ``gallery.delete_snapshot`` per event
+      * their ``FRSEvent`` rows + the stored face-crop blobs
+      * their ``Attendance`` rows
+      * their ``Photo`` rows + the stored image/thumbnail blobs
+      * the person's ID-document blob + profile thumbnail blob
+      * the person row itself
+
+    Idempotent (missing blobs / already-gone vectors are ignored). References from
+    TransitSession / feedback are left as SET NULL by their FK, as intended.
+    """
+    import contextlib
+
     from fastapi.concurrency import run_in_threadpool
 
     from .. import gallery
-    from ..domain.models import Photo
+    from ..domain.models import Attendance, FRSEvent, Photo
 
     p = await db.get(Person, person_id)
     if p is None:
         raise NotFoundError("person not found")
-    name, id_key = p.full_name, p.id_file_key
-    # Collect photo blob keys before the cascade delete removes the rows.
-    photo_keys = (
-        await db.execute(select(Photo.storage_key).where(Photo.person_id == person_id))
+    name, id_key, thumb_key = p.full_name, p.id_file_key, p.thumbnail_key
+    pid = str(person_id)
+
+    # 1. Load the person's events first — we need their ids (for snapshot vectors)
+    #    and their snapshot blob keys before the rows are deleted.
+    events = (
+        await db.execute(select(FRSEvent).where(FRSEvent.person_id == person_id))
     ).scalars().all()
-    await run_in_threadpool(gallery.delete_by_person, str(person_id))
-    await db.delete(p)  # frs_photos cascade via FK
+    event_snapshot_keys: list[str] = []
+    for ev in events:
+        attrs = ev.attributes or {}
+        for k in (ev.snapshot_key, attrs.get("face_snapshot")):
+            if k:
+                event_snapshot_keys.append(k)
+
+    # 2. Load photo blob keys before deleting the rows.
+    photos = (
+        await db.execute(select(Photo).where(Photo.person_id == person_id))
+    ).scalars().all()
+    photo_keys: list[str] = []
+    for ph in photos:
+        for k in (ph.storage_key, ph.thumbnail_key):
+            if k:
+                photo_keys.append(k)
+
+    # 3. Purge vectors (gallery + forensic snapshots). Qdrant calls are sync.
+    await run_in_threadpool(gallery.delete_by_person, pid)
+    for ev in events:
+        await run_in_threadpool(gallery.delete_snapshot, str(ev.id))
+
+    # 4. Delete the DB rows: events + attendance + photos explicitly (GDPR — not the
+    #    FK's SET NULL/CASCADE default), then the person.
+    for ev in events:
+        await db.delete(ev)
+    for a in (
+        await db.execute(select(Attendance).where(Attendance.person_id == person_id))
+    ).scalars().all():
+        await db.delete(a)
+    for ph in photos:
+        await db.delete(ph)
+    await db.delete(p)
     await db.commit()
-    for key in [*photo_keys, id_key]:
+
+    # 5. Delete the stored blobs (best-effort, idempotent).
+    for key in [*photo_keys, *event_snapshot_keys, id_key, thumb_key]:
         if not key:
             continue
-        try:
+        with contextlib.suppress(Exception):
             await get_storage().delete(key)
-        except Exception:  # pragma: no cover — best-effort blob cleanup
-            pass
+
     await audit_record(
         db, actor=actor, action="frs.person.delete", target_type="frs_person",
-        target_id=str(person_id), meta={"full_name": name},
+        target_id=pid, meta={"full_name": name},
     )
 
 

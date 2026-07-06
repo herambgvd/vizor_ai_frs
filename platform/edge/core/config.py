@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     # MediaMTX control API (camera path register / republish / record).
     mediamtx_url: str = "http://localhost:9997"
+    # Browser-reachable MediaMTX host for live playback URLs (HLS/WebRTC). None =
+    # derive from mediamtx_url (fine when that host is already public).
+    mediamtx_public_host: str | None = None
 
     # --- App auth (the app's own users, NOT the license) -------------------
     jwt_secret: str = "change-me-in-prod"
@@ -108,6 +111,9 @@ class Settings(BaseSettings):
     storage_local_dir: str = "./data/storage"
     storage_base_url: str = "/files"          # public URL prefix for local files
     s3_endpoint: str | None = None            # e.g. http://minio:9000 (None = AWS)
+    # Browser-reachable S3 host for presigned URLs when the internal endpoint above
+    # is a private docker hostname (e.g. http://localhost:9000). None = use s3_endpoint.
+    s3_public_endpoint: str | None = None
     s3_region: str = "us-east-1"
     s3_bucket: str | None = None
     s3_access_key: str | None = None

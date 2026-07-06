@@ -99,7 +99,15 @@ async def update_camera(
     c = await db.get(Camera, camera_id)
     if c is None:
         raise NotFoundError("camera not found")
-    patch = data.model_dump(exclude_none=True)
+    # exclude_unset so a client can clear the optional text fields (location/zone)
+    # with an explicit null. Every other Camera column is non-nullable, so a stray
+    # null there is meaningless — drop it rather than violate NOT NULL.
+    _CLEARABLE = {"location", "zone"}
+    patch = {
+        k: v
+        for k, v in data.model_dump(exclude_unset=True).items()
+        if v is not None or k in _CLEARABLE
+    }
     for key, value in patch.items():
         setattr(c, key, value)
     await db.commit()

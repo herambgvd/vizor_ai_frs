@@ -8,6 +8,7 @@ system / audit / realtime) so we can build and test the shared EDGE UI. FRS doma
 + feature modules get registered in app/registry.py as they're built.
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from edge.app import create_base_app
@@ -17,6 +18,8 @@ from edge.core.logging import get_logger
 from edge.db.base import get_sessionmaker
 
 from .registry import build_registry
+from .retention import retention_sweeper_loop
+from .scheduler import start_background_tasks, stop_background_tasks
 
 log = get_logger("frs")
 
@@ -31,7 +34,21 @@ async def lifespan(app):
             )
             if created:
                 log.info("bootstrapped first admin: %s", settings.bootstrap_admin_email)
-    yield
+    # FRS background daemons: report auto-send + transit overdue sweep + retention.
+    # A failure to start any daemon must never crash app startup.
+    tasks: list[asyncio.Task] = []
+    try:
+        tasks = start_background_tasks()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("failed to start FRS background tasks: %s", exc)
+    try:
+        tasks.append(asyncio.create_task(retention_sweeper_loop(), name="frs-retention"))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("failed to start FRS retention sweeper: %s", exc)
+    try:
+        yield
+    finally:
+        stop_background_tasks(tasks)
 
 
 from .api import domain_routers  # noqa: E402 — after lifespan is defined

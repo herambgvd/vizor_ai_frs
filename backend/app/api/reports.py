@@ -9,14 +9,15 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from edge.auth.deps import require_permission
+from edge.auth.security import verify_password
 from edge.core.audit import record as audit_record
-from edge.core.errors import NotFoundError, ValidationError
+from edge.core.errors import ForbiddenError, NotFoundError, ValidationError
 from edge.core.pagination import Page, PageParams, page_params, paginate
 from edge.core.storage import get_storage
 from edge.db.base import get_db
@@ -46,12 +47,22 @@ async def attendance_log(
     if until:
         stmt = stmt.where(Attendance.day_key <= until)
     page = await paginate(db, stmt, params)
-    items = [
-        {"person_id": str(a.person_id) if a.person_id else None, "person_name": a.person_name,
-         "day": a.day_key, "check_in_at": a.check_in_at.isoformat() if a.check_in_at else None,
-         "check_out_at": a.check_out_at.isoformat() if a.check_out_at else None}
-        for a in page.items
-    ]
+    storage = get_storage()
+    items = []
+    for a in page.items:
+        ci, co = a.check_in_at, a.check_out_at
+        duration = int((co - ci).total_seconds()) if (ci and co and co >= ci) else None
+        items.append({
+            "id": str(a.id),
+            "person_id": str(a.person_id) if a.person_id else None,
+            "person_name": a.person_name,
+            "day": a.day_key,
+            "check_in_at": ci.isoformat() if ci else None,
+            "check_out_at": co.isoformat() if co else None,
+            "check_in_url": await storage.url(a.check_in_snapshot) if a.check_in_snapshot else None,
+            "check_out_url": await storage.url(a.check_out_snapshot) if a.check_out_snapshot else None,
+            "duration_seconds": duration,
+        })
     return {"items": items, "total": page.total, "page": page.page, "pages": page.pages}
 
 
@@ -74,6 +85,29 @@ async def attendance_report(
     ).all()
     items = [{"person_name": n or "—", "days_present": d, "first_seen": f, "last_seen": l} for n, d, f, l in rows]
     return {"items": items, "day_from": df, "day_to": dt_}
+
+
+@router.delete("/attendance/{att_id}")
+async def delete_attendance(
+    att_id: uuid.UUID,
+    password: str = Body(..., embed=True),
+    db: AsyncSession = Depends(get_db),
+    actor=Depends(require_permission(FrsPerm.EVENT_MANAGE)),
+) -> dict:
+    """Delete one attendance record. Sensitive action — the operator must re-enter
+    their own password to confirm."""
+    if not password or not verify_password(password, actor.password_hash):
+        raise ForbiddenError("incorrect password")
+    row = await db.get(Attendance, att_id)
+    if row is None:
+        raise NotFoundError("attendance record not found")
+    await db.delete(row)
+    await db.commit()
+    await audit_record(
+        db, actor=actor, action="frs.attendance.delete", target_type="frs_attendance",
+        target_id=str(att_id), meta={"person": row.person_name, "day": row.day_key},
+    )
+    return {"status": "deleted"}
 
 
 # --- reports (static routes before the {report} catch-all) -------------------
@@ -119,7 +153,7 @@ async def report_export(
     if format not in ("csv", "xlsx"):
         raise ValidationError("format must be csv or xlsx")
     data = await rpt.build(db, report, day_from, day_to)
-    blob, ctype = rpt.to_bytes(data, format)
+    blob, ctype = await rpt.to_bytes(data, format)
     fname = f"{report}-{dt.date.today().isoformat()}.{format}"
     return StreamingResponse(iter([blob]), media_type=ctype,
                              headers={"Content-Disposition": f"attachment; filename={fname}"})

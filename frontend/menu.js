@@ -12,6 +12,7 @@ export const menuItems = [
   { title: "Investigate", icon: "heroicons-outline:magnifying-glass", link: "/investigate", perm: "frs.event.read" },
   { title: "Transit", icon: "heroicons-outline:arrows-right-left", link: "/transit", perm: "frs.transit.read" },
   { title: "Tour", icon: "heroicons-outline:map", link: "/tour", perm: "frs.event.read" },
+  { title: "Attendance", icon: "heroicons-outline:calendar-days", link: "/attendance", perm: "frs.event.read" },
   { title: "Groups", icon: "heroicons-outline:user-group", link: "/groups", perm: "frs.group.read" },
   { title: "POI", icon: "heroicons-outline:users", link: "/persons", perm: "frs.person.read" },
   { title: "Reports", icon: "heroicons-outline:document-chart-bar", link: "/reports", perm: "frs.event.read" },

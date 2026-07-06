@@ -1,11 +1,16 @@
 """FRS reports — build tabular report data + CSV/XLSX export, and run scheduled
-reports (generate → store → email). Ported from vizor_nvr FRS.
+reports (generate → store → email). Ported from vizor_nvr FRS (reports4.py).
 
 Four fixed reports over a [day_from, day_to] window:
-  * attendance — per-person daily presence
-  * group      — per-group sighting activity
-  * mismatch   — low-confidence recognitions (likely mis-identifications)
-  * unknown    — unidentified face sightings
+  * attendance — per person/day: First-In, Last-Out, Duration (+ face snapshot).
+  * group      — per group: Headcount, Present, Attendance Compliance %.
+  * mismatch   — entry/exit transit sessions: Resolved / Unresolved / Unpaired.
+  * unknown    — unidentified face sightings, with detector confidence %.
+
+Each report has a JSON shape (the ``columns``/``items`` the UI table renders) and
+the same rows are exportable as CSV or XLSX via ``to_bytes``. The XLSX export
+embeds the actual face snapshot thumbnail per row (fetched — and decrypted — from
+object storage); CSV/JSON stay text (CSV emits a present/absent snapshot marker).
 """
 
 from __future__ import annotations
@@ -14,14 +19,16 @@ import csv
 import datetime as dt
 import io
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .domain.models import Attendance, FRSEvent, Group, Person
+from edge.core.storage import _dec, get_storage
+
+from .domain.models import Attendance, FRSEvent, Group, Person, TransitSession
 
 REPORTS = ("attendance", "group", "mismatch", "unknown")
-# Recognised but below this cosine is treated as a likely mismatch for review.
-_MISMATCH_HI = 0.55
+
+_XLSX_CTYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 def _range(day_from: str | None, day_to: str | None):
@@ -33,90 +40,213 @@ def _range(day_from: str | None, day_to: str | None):
     return df, dt_, start, end
 
 
+def _iso(value) -> str | None:
+    return value.isoformat() if value else None
+
+
+def _fmt_duration(seconds: float | None) -> str:
+    """Human "Xh Ym" duration; an em-dash when there's no paired out-time."""
+    if not seconds or seconds < 0:
+        return "—"
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    return f"{h}h {m}m"
+
+
 async def build(db: AsyncSession, report: str, day_from: str | None, day_to: str | None) -> dict:
     df, dt_, start, end = _range(day_from, day_to)
 
+    # ── 1. Attendance: First-In, Last-Out, Duration (per person/day) ──────────
     if report == "attendance":
-        rows = (
-            await db.execute(
-                select(Attendance).where(Attendance.day_key >= df.isoformat(), Attendance.day_key <= dt_.isoformat())
-                .order_by(Attendance.day_key.desc())
-            )
-        ).scalars().all()
-        items = [
-            {"person": r.person_name or "—", "day": r.day_key,
-             "check_in": r.check_in_at.isoformat() if r.check_in_at else None,
-             "check_out": r.check_out_at.isoformat() if r.check_out_at else None}
-            for r in rows
-        ]
-        return {"columns": ["person", "day", "check_in", "check_out"], "items": items}
-
-    if report == "group":
-        # sightings per group over the window
+        columns = ["snapshot", "day", "person_name", "first_in", "last_out", "duration"]
         stmt = (
-            select(Group.name, func.count(FRSEvent.id))
-            .select_from(FRSEvent)
-            .join(Person, Person.id == FRSEvent.person_id)
-            .join(Group, Group.id == Person.group_id)
-            .where(FRSEvent.triggered_at >= start, FRSEvent.triggered_at <= end)
-            .group_by(Group.name)
-            .order_by(func.count(FRSEvent.id).desc())
+            select(
+                Attendance.day_key, Attendance.person_id, Attendance.person_name,
+                Person.full_name, Attendance.check_in_at, Attendance.check_out_at,
+                Attendance.check_in_snapshot, Attendance.check_out_snapshot,
+            )
+            .outerjoin(Person, Person.id == Attendance.person_id)
+            .where(and_(Attendance.day_key >= df.isoformat(), Attendance.day_key <= dt_.isoformat()))
+            .order_by(Attendance.day_key.desc(), Person.full_name)
         )
-        rows = (await db.execute(stmt)).all()
-        return {"columns": ["group", "sightings"], "items": [{"group": n, "sightings": c} for n, c in rows]}
+        items = []
+        for day, pid, aname, fname, cin, cout, cin_snap, cout_snap in (await db.execute(stmt)).all():
+            last = cout or cin
+            dur = (last - cin).total_seconds() if (cin and last) else None
+            items.append({
+                "snapshot": cin_snap or cout_snap or "",
+                "day": day,
+                "person_name": fname or aname or (f"Person {str(pid)[:8]}" if pid else "Unknown"),
+                "first_in": _iso(cin),
+                "last_out": _iso(cout) or _iso(cin),
+                "duration": _fmt_duration(dur),
+            })
+        return {"columns": columns, "items": items, "total": len(items)}
 
+    # ── 2. Group: Headcount, Present, Attendance Compliance % ─────────────────
+    if report == "group":
+        columns = ["group", "headcount", "present", "compliance_pct"]
+        # Total enrolled persons per group (headcount).
+        head = dict((await db.execute(
+            select(Person.group_id, func.count())
+            .where(Person.group_id.isnot(None))
+            .group_by(Person.group_id)
+        )).all())
+        # Distinct persons of a group seen at least once in the window (present).
+        present = dict((await db.execute(
+            select(Person.group_id, func.count(func.distinct(Attendance.person_id)))
+            .join(Person, Person.id == Attendance.person_id)
+            .where(and_(Attendance.day_key >= df.isoformat(), Attendance.day_key <= dt_.isoformat(),
+                        Person.group_id.isnot(None)))
+            .group_by(Person.group_id)
+        )).all())
+        groups = (await db.execute(select(Group.id, Group.name))).all()
+        items = []
+        for gid, gname in groups:
+            hc = int(head.get(gid, 0))
+            pr = int(present.get(gid, 0))
+            comp = round(100.0 * pr / hc, 1) if hc else 0.0
+            items.append({"group": gname, "headcount": hc, "present": pr, "compliance_pct": comp})
+        items.sort(key=lambda r: r["headcount"], reverse=True)
+        return {"columns": columns, "items": items, "total": len(items)}
+
+    # ── 3. Entry/Exit Mismatch: transit sessions (Resolved/Unresolved/Unpaired)
     if report == "mismatch":
-        rows = (
-            await db.execute(
-                select(FRSEvent).where(
-                    FRSEvent.event_type == "face_recognized",
-                    FRSEvent.confidence.isnot(None), FRSEvent.confidence < _MISMATCH_HI,
-                    FRSEvent.triggered_at >= start, FRSEvent.triggered_at <= end,
-                ).order_by(FRSEvent.triggered_at.desc())
-            )
-        ).scalars().all()
-        items = [{"time": e.triggered_at.isoformat(), "person": e.person_name or "—",
-                  "camera": e.camera_name or "—", "confidence": e.confidence} for e in rows]
-        return {"columns": ["time", "person", "camera", "confidence"], "items": items}
+        columns = ["snapshot", "person_name", "entry_time", "exit_time", "status"]
+        stmt = (
+            select(TransitSession, Person.full_name)
+            .outerjoin(Person, Person.id == TransitSession.person_id)
+            .where(and_(TransitSession.started_at >= start, TransitSession.started_at <= end))
+            .order_by(TransitSession.started_at.desc())
+        )
+        items = []
+        for sess, fname in (await db.execute(stmt)).all():
+            attrs = sess.attributes or {}
+            # closed = resolved (paired entry+exit); overdue/open = unresolved/unpaired.
+            if sess.status == "closed":
+                status = "Resolved"
+            elif sess.status == "overdue":
+                status = "Unresolved (overdue)"
+            else:
+                status = "Unpaired (no exit)"
+            items.append({
+                "snapshot": attrs.get("entry_snapshot") or attrs.get("exit_snapshot")
+                or attrs.get("face_snapshot") or "",
+                "person_name": fname or attrs.get("person_name")
+                or (f"Person {str(sess.person_id)[:8]}" if sess.person_id else "Unknown"),
+                "entry_time": _iso(sess.started_at),
+                "exit_time": _iso(sess.ended_at) or "—",
+                "status": status,
+            })
+        return {"columns": columns, "items": items, "total": len(items)}
 
+    # ── 4. Unknown Attempts: time, camera, detector confidence % ──────────────
     if report == "unknown":
-        rows = (
-            await db.execute(
-                select(FRSEvent).where(
-                    FRSEvent.event_type == "face_unknown",
-                    FRSEvent.triggered_at >= start, FRSEvent.triggered_at <= end,
-                ).order_by(FRSEvent.triggered_at.desc())
-            )
-        ).scalars().all()
-        items = [{"time": e.triggered_at.isoformat(), "camera": e.camera_name or "—",
-                  "confidence": e.confidence, "snapshot_key": e.snapshot_key} for e in rows]
-        return {"columns": ["time", "camera", "confidence"], "items": items}
+        # "detected_pct" is the DETECTOR confidence (a face was found) — the match
+        # score is always 0 on an Unknown, so showing that reads as a confusing "0%".
+        columns = ["snapshot", "time", "camera", "detected_pct"]
+        stmt = (
+            select(FRSEvent).where(and_(
+                FRSEvent.event_type == "face_unknown",
+                FRSEvent.triggered_at >= start, FRSEvent.triggered_at <= end,
+            )).order_by(FRSEvent.triggered_at.desc()).limit(2000)
+        )
+        evs = (await db.execute(stmt)).scalars().all()
+        items = []
+        for e in evs:
+            attrs = e.attributes or {}
+            det = attrs.get("det_confidence")
+            if det is None:
+                det = float(e.confidence or 0.0)
+            items.append({
+                "snapshot": attrs.get("face_snapshot") or e.snapshot_key or "",
+                "time": _iso(e.triggered_at),
+                "camera": attrs.get("camera_name") or e.camera_name
+                or (str(e.camera_id)[:8] if e.camera_id else "—"),
+                "detected_pct": round(float(det) * 100, 1),
+            })
+        return {"columns": columns, "items": items, "total": len(items)}
 
     raise ValueError(f"unknown report {report!r}")
 
 
-def to_bytes(data: dict, fmt: str) -> tuple[bytes, str]:
-    """Serialise a report dict to CSV or XLSX bytes; returns (bytes, content_type)."""
+# ── export ────────────────────────────────────────────────────────────────────
+async def to_bytes(data: dict, fmt: str) -> tuple[bytes, str]:
+    """Serialise a report dict to CSV or XLSX bytes; returns (bytes, content_type).
+
+    CSV is plain text — it can't embed an image, so the ``snapshot`` column (when
+    present) becomes a "yes"/absent marker. XLSX embeds the actual face thumbnail
+    per row, fetched (and decrypted) from object storage by its stored key.
+    """
     cols = data["columns"]
     items = data["items"]
+    has_snap = "snapshot" in cols
+
     if fmt == "csv":
         buf = io.StringIO()
         w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
         w.writeheader()
         for row in items:
-            w.writerow(row)
+            out = {c: row.get(c, "") for c in cols}
+            if has_snap:
+                out["snapshot"] = "yes" if row.get("snapshot") else ""
+            w.writerow(out)
         return buf.getvalue().encode("utf-8"), "text/csv"
-    # xlsx
+
+    # xlsx — prefetch each row's snapshot bytes (async storage read) up front, then
+    # build the workbook synchronously.
+    snaps: dict[str, bytes] = {}
+    if has_snap:
+        storage = get_storage()
+        for row in items:
+            key = row.get("snapshot")
+            if key and key not in snaps:
+                try:
+                    # The S3 backend returns bytes as-stored; protected (biometric)
+                    # keys are encrypted at rest, so decrypt before embedding.
+                    snaps[key] = _dec(key, await storage.get(key))
+                except Exception:  # noqa: BLE001 — a missing/unreadable crop just omits the image
+                    snaps[key] = b""
+    return _xlsx(cols, items, snaps), _XLSX_CTYPE
+
+
+def _xlsx(cols: list[str], items: list[dict], snaps: dict[str, bytes]) -> bytes:
     from openpyxl import Workbook
+    from openpyxl.drawing.image import Image as XLImage
+    from openpyxl.styles import Alignment, Font
+    from openpyxl.utils import get_column_letter
 
     wb = Workbook()
     ws = wb.active
+    has_snap = "snapshot" in cols
     ws.append([c.replace("_", " ").title() for c in cols])
-    for row in items:
-        ws.append([row.get(c) for c in cols])
+    for c in ws[1]:
+        c.font = Font(bold=True)
+        c.alignment = Alignment(vertical="center")
+
+    THUMB = 56  # px — embedded face thumbnail size
+    for ri, row in enumerate(items, start=2):
+        ws.append([("" if c == "snapshot" else row.get(c, "")) for c in cols])
+        if not has_snap:
+            continue
+        raw = snaps.get(row.get("snapshot") or "")
+        if not raw:
+            continue
+        try:
+            img = XLImage(io.BytesIO(raw))
+            img.width = img.height = THUMB
+            col_letter = get_column_letter(cols.index("snapshot") + 1)
+            ws.row_dimensions[ri].height = THUMB * 0.78  # pt
+            ws.add_image(img, f"{col_letter}{ri}")
+        except Exception:  # noqa: BLE001 — bad bytes just leave the cell empty
+            pass
+
+    if has_snap:
+        ws.column_dimensions[get_column_letter(cols.index("snapshot") + 1)].width = 10
+
     out = io.BytesIO()
     wb.save(out)
-    return out.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    return out.getvalue()
 
 
 def next_run(frequency: str, at_time: str, after: dt.datetime | None = None) -> dt.datetime:
@@ -145,7 +275,7 @@ async def run_schedule(db: AsyncSession, schedule) -> "object":
     df = (dt.date.today() - dt.timedelta(days=schedule.range_days)).isoformat()
     dt_ = dt.date.today().isoformat()
     data = await build(db, schedule.report, df, dt_)
-    blob, ctype = to_bytes(data, schedule.fmt)
+    blob, ctype = await to_bytes(data, schedule.fmt)
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
     filename = f"{schedule.report}-{stamp}.{schedule.fmt}"
     key = f"frs/reports/{filename}"

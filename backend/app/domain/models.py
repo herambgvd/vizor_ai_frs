@@ -127,12 +127,26 @@ class Camera(Base):
     zone: Mapped[str | None] = mapped_column(String, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     recognition_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    # Recognition tuning.
+    # Per-camera recognition tuning (vizor_nvr camera_config_schema parity).
+    # Recognition & matching.
     min_confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
-    fps: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
-    min_face_px: Mapped[int] = mapped_column(Integer, nullable=False, default=40)
+    # Emit face-detected events without identifying.
+    detection_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     # entry | exit | both — used by the transit engine.
     direction: Mapped[str] = mapped_column(String, nullable=False, default="both")
+    # Liveness / anti-spoof.
+    liveness_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    liveness_threshold: Mapped[float] = mapped_column(Float, nullable=False, default=0.7)
+    # Quality gates.
+    det_conf: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
+    min_face_px: Mapped[int] = mapped_column(Integer, nullable=False, default=28)
+    min_sharpness: Mapped[int] = mapped_column(Integer, nullable=False, default=25)
+    max_pose_deg: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
+    dwell_min_frames: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    # Alerting.
+    alert_suppress_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=300)
+    # Stream.
+    fps: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     # none | nvdec — hardware decode selection for the RTSP reader.
     hw_accel: Mapped[str] = mapped_column(String, nullable=False, default="none")
     # Polygon regions of interest (list of {points:[[x,y],...]} in 0..1 coords).
@@ -161,8 +175,13 @@ class FRSEvent(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     camera_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True, index=True)
     camera_name: Mapped[str | None] = mapped_column(String, nullable=True)
-    # face_recognized | face_unknown | spoof_detected | face_detected
+    # face_recognized | face_unknown | spoof_detected | face_detected | transit_overdue
     event_type: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    # Alert framing (vizor_nvr FRSEvent parity): a transit_overdue is severity
+    # "warning" / detection_type "transit"; a face sighting is "info" / "face".
+    severity: Mapped[str] = mapped_column(String, nullable=False, default="info")
+    title: Mapped[str | None] = mapped_column(String, nullable=True)
+    detection_type: Mapped[str | None] = mapped_column(String, nullable=True, default="face")
     person_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("frs_persons.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -287,6 +306,8 @@ class Attendance(Base):
     check_out_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     check_in_snapshot: Mapped[str | None] = mapped_column(String, nullable=True)
     check_out_snapshot: Mapped[str | None] = mapped_column(String, nullable=True)
+    # The event_type of the sighting that created this row (vizor_nvr parity).
+    sighting_type: Mapped[str | None] = mapped_column(String, nullable=True)
     event_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)

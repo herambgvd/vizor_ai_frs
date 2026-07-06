@@ -11,6 +11,7 @@ from edge.db.base import get_db
 
 from .. import settings_store
 from ..domain.permissions import FrsPerm
+from .schemas import FrsSettingsUpdate
 
 router = APIRouter(prefix="/frs/settings", tags=["frs-settings"])
 
@@ -25,14 +26,14 @@ async def get_settings(
 
 @router.put("")
 async def update_settings(
-    body: dict,
+    body: FrsSettingsUpdate,
     db: AsyncSession = Depends(get_db),
     actor=Depends(require_permission(FrsPerm.SETTINGS_MANAGE)),
 ) -> dict:
     row = await settings_store.get_settings_row(db)
-    for key in ("public_dashboard_enabled", "public_show_names", "ingest_api_enabled"):
-        if key in body:
-            setattr(row, key, bool(body[key]))
+    # Only the public-dashboard / ingest feature toggles are settable here.
+    for key, value in body.model_dump(exclude_unset=True).items():
+        setattr(row, key, bool(value))
     await db.commit()
     await db.refresh(row)
     await audit_record(db, actor=actor, action="frs.settings.update", target_type="frs_settings", target_id="singleton")

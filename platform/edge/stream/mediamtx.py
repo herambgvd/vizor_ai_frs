@@ -54,6 +54,10 @@ class MediaMTXClient:
         self._client = httpx.Client(base_url=self.base_url, timeout=10.0)
         # Host used to build republish URLs (strip scheme/port from control URL).
         self._host = urlparse(self.base_url).hostname or "localhost"
+        # Browser-reachable host for playback URLs. The control URL host is often an
+        # internal docker name (vizor-mediamtx) a browser can't resolve; when set,
+        # read_url() uses this public host for HLS/WebRTC/RTSP links instead.
+        self._public_host = get_settings().mediamtx_public_host or self._host
 
     # ------------------------------------------------------------------ helpers
     def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
@@ -112,14 +116,15 @@ class MediaMTXClient:
             ``http://localhost:8888/cam-1/index.m3u8`` for HLS.
         """
         proto = proto.lower()
+        host = self._public_host  # browser-reachable
         if proto == "rtsp":
-            return f"rtsp://{self._host}:{_RTSP_PORT}/{name}"
+            return f"rtsp://{host}:{_RTSP_PORT}/{name}"
         if proto == "webrtc":
             # MediaMTX serves a WHEP/WebRTC page/endpoint at this path.
-            return f"http://{self._host}:{_WEBRTC_PORT}/{name}"
+            return f"http://{host}:{_WEBRTC_PORT}/{name}"
         if proto == "hls":
             # HLS playlist entrypoint.
-            return f"http://{self._host}:{_HLS_PORT}/{name}/index.m3u8"
+            return f"http://{host}:{_HLS_PORT}/{name}/index.m3u8"
         raise ValueError(f"unsupported proto {proto!r}; use rtsp | webrtc | hls")
 
     # ------------------------------------------------------------------ lifecycle
