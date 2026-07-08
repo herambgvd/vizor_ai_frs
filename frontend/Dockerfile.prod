@@ -1,0 +1,36 @@
+# Frs — PRODUCTION frontend image (Next.js standalone).
+#   Build context = repo root:  docker build -f frontend/Dockerfile.prod -t vizor-suspect-frontend:prod .
+# Multi-stage: install deps → build the standalone server (with the vendored platform
+# web/ copied in and same-origin API baked) → copy the trimmed output into a slim
+# non-root runtime. No dev server, no source, no node_modules bloat.
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm install --legacy-peer-deps
+
+FROM node:20-alpine AS build
+WORKDIR /app
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    NODE_ENV=production \
+    NEXT_PUBLIC_API_URL=""
+COPY --from=deps /app/node_modules ./node_modules
+COPY frontend/ ./
+# Vendored shared platform web (resolved via the @/web alias at build time).
+COPY platform/web ./web
+RUN npm run build
+
+FROM node:20-alpine AS runtime
+WORKDIR /app
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=3000 \
+    HOSTNAME=0.0.0.0
+RUN addgroup -g 10001 vizor && adduser -D -u 10001 -G vizor vizor
+COPY --from=build /app/public ./public
+COPY --from=build --chown=vizor:vizor /app/.next/standalone ./
+COPY --from=build --chown=vizor:vizor /app/.next/static ./.next/static
+USER vizor
+EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD wget -qO- http://localhost:3000/ >/dev/null 2>&1 || exit 1
+CMD ["node", "server.js"]

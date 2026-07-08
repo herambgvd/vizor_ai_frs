@@ -120,7 +120,11 @@ class MediaMTXClient:
         if proto == "rtsp":
             return f"rtsp://{host}:{_RTSP_PORT}/{name}"
         if proto == "webrtc":
-            # MediaMTX serves a WHEP/WebRTC page/endpoint at this path.
+            # Prefer a same-origin proxied base (TLS, no mixed-content) when configured;
+            # otherwise the direct MediaMTX WebRTC/WHEP endpoint.
+            base = get_settings().mediamtx_public_webrtc_base
+            if base:
+                return f"{base.rstrip('/')}/{name}"
             return f"http://{host}:{_WEBRTC_PORT}/{name}"
         if proto == "hls":
             # HLS playlist entrypoint.

@@ -1,0 +1,12 @@
+# Minimal MediaMTX config for FRS. Enables the HTTP control API (:9997) that the
+# stream supervisor uses to register camera paths, and grants anonymous access
+# (single-tenant, on the private stack). Paths are added at runtime.
+api: yes
+apiAddress: :9997
+authInternalUsers:
+  - user: any
+    permissions:
+      - action: api
+      - action: publish
+      - action: read
+      - action: playback

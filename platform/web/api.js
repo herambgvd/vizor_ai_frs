@@ -3,10 +3,15 @@
 // it routes to the "License Expired" screen so an admin can renew.
 import axios from "axios";
 
-// Derive the API host from wherever the UI is loaded — so accessing the app from
-// another machine on the LAN (http://<host-ip>:3000) hits that same host's :8000.
+// API base resolution, in priority order:
+//  • NEXT_PUBLIC_API_URL="" (empty)  → same-origin relative "/api/v1". This is the
+//    PRODUCTION mode: the reverse proxy serves UI + API on one origin, so one image
+//    works for every client with no per-deployment rebuild. (`??` keeps the empty
+//    string; only an *unset* var falls through to the dev default.)
+//  • NEXT_PUBLIC_API_URL="http://host:port" → explicit backend (dev/compose).
+//  • unset → derive from the browser host on :8000 (bare LAN dev).
 const apiHost = typeof window !== "undefined" ? window.location.hostname : "localhost";
-const BASE = process.env.NEXT_PUBLIC_API_URL || `http://${apiHost}:8000`;
+const BASE = process.env.NEXT_PUBLIC_API_URL ?? `http://${apiHost}:8000`;
 
 export const ACCESS_KEY = "vizor.access";
 export const REFRESH_KEY = "vizor.refresh";

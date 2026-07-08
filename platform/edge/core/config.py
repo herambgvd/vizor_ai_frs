@@ -65,6 +65,11 @@ class Settings(BaseSettings):
     # Browser-reachable MediaMTX host for live playback URLs (HLS/WebRTC). None =
     # derive from mediamtx_url (fine when that host is already public).
     mediamtx_public_host: str | None = None
+    # Full browser-reachable base for WebRTC/WHEP signaling when MediaMTX is proxied
+    # same-origin behind TLS, e.g. "https://192.168.1.50/webrtc". When set,
+    # read_url("webrtc") returns "<base>/<path>" instead of http://<host>:8889 — this
+    # avoids mixed-content blocking on an HTTPS page and needs no extra host port.
+    mediamtx_public_webrtc_base: str | None = None
 
     # --- App auth (the app's own users, NOT the license) -------------------
     jwt_secret: str = "change-me-in-prod"

@@ -1,0 +1,43 @@
+# Frs — PRODUCTION backend image.
+#   Build context = repo root:  docker build -f backend/Dockerfile.prod -t vizor-suspect-backend:prod .
+# Differences vs the dev image: source is COPIED in (no bind mount, no --reload),
+# served by gunicorn + uvicorn workers, runs as a non-root user, and self-migrates
+# on start. The same image backs the API, the stream worker and celery (compose
+# overrides the command per service).
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    WEB_CONCURRENCY=4
+
+WORKDIR /app
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg curl \
+ && rm -rf /var/lib/apt/lists/*
+
+# Vendored platform + runtime deps (+ gunicorn for the prod server, NVML for GPU stats).
+COPY platform /edge
+RUN pip install -e "/edge[messaging,tasks,reports,system,storage,runtime,vector]" \
+ && pip install gunicorn nvidia-ml-py
+
+# Scenario source baked into the image (not bind-mounted).
+COPY backend/pyproject.toml ./
+COPY backend/app ./app
+COPY backend/migrations ./migrations
+COPY backend/alembic.ini ./
+COPY backend/scripts ./scripts
+RUN pip install -e "."
+
+# Drop root.
+RUN useradd -r -u 10001 -m vizor && chown -R vizor:vizor /app /edge
+USER vizor
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+  CMD curl -fsS http://localhost:8000/health || exit 1
+
+# Ensure the DB exists, migrate to head, then serve with gunicorn + uvicorn workers.
+CMD ["bash", "-lc", "python scripts/ensure_db.py && alembic upgrade head && exec gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w ${WEB_CONCURRENCY:-4} -b 0.0.0.0:8000 --timeout 120 --graceful-timeout 30 --access-logfile - --error-logfile -"]
