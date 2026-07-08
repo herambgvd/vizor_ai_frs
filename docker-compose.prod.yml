@@ -22,7 +22,7 @@ services:
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
-    ports: ["80:80", "443:443"]
+    ports: ["${VIZOR_PORT:-5010}:${VIZOR_PORT:-5010}"]
     environment:
       VIZOR_SITE_ADDRESS: ${VIZOR_SITE_ADDRESS:?set VIZOR_SITE_ADDRESS}
       VIZOR_HOST_IP: ${VIZOR_HOST_IP:-127.0.0.1}
