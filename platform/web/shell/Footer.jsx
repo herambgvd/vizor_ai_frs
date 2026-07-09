@@ -12,7 +12,7 @@ export default function Footer() {
     queryFn: () => api.get("/branding").then((r) => r.data),
     staleTime: 60_000,
   });
-  const name = data?.app_name || "Neubit";
+  const name = data?.app_name || "wonin.ai";
   const year = new Date().getFullYear();
 
   return (
@@ -21,7 +21,7 @@ export default function Footer() {
         <span>
           © {year} {name}. All rights reserved.
         </span>
-        <span className="hidden sm:inline">Powered by Neubit</span>
+        <span className="hidden sm:inline">Powered by wonin.ai</span>
       </div>
     </footer>
   );

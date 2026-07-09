@@ -41,7 +41,7 @@ export default function GlobalError({ error, reset }) {
             Something went wrong
           </h1>
           <p style={{ color: "#a1a1a1", fontSize: 14, marginTop: 8 }}>
-            A critical error occurred while loading Neubit. Please try again.
+            A critical error occurred while loading wonin.ai. Please try again.
           </p>
           {error?.message && (
             <div

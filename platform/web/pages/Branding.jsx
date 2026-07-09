@@ -99,7 +99,7 @@ export default function BrandingPage() {
               label="App name"
               value={form.app_name}
               onChange={(e) => setForm({ ...form, app_name: e.target.value })}
-              placeholder="Neubit"
+              placeholder="wonin.ai"
               hint="Always used for the browser tab title."
             />
 

@@ -112,7 +112,7 @@ export default function FrsLogin() {
                 <Icon icon="heroicons-solid:viewfinder-circle" className="text-white text-2xl" />
               </div>
               <div>
-                <div className="text-lg font-semibold tracking-tight text-white leading-none">Neubit</div>
+                <div className="text-lg font-semibold tracking-tight text-white leading-none">wonin.ai</div>
                 <div className="text-[11px] uppercase tracking-[0.2em] text-cyan-300/70 mt-1">Face Recognition</div>
               </div>
             </div>
@@ -140,7 +140,7 @@ export default function FrsLogin() {
               <div className="h-9 w-9 rounded-lg bg-gradient-to-br from-cyan-400 to-blue-600 flex items-center justify-center">
                 <Icon icon="heroicons-solid:viewfinder-circle" className="text-white text-xl" />
               </div>
-              <div className="text-base font-semibold text-white">Neubit <span className="text-cyan-300/70 font-normal">FRS</span></div>
+              <div className="text-base font-semibold text-white">wonin.ai <span className="text-cyan-300/70 font-normal">FRS</span></div>
             </div>
 
             {mfaToken ? (
@@ -190,7 +190,7 @@ export default function FrsLogin() {
             )}
 
             <div className="mt-8 flex items-center justify-between text-[11px] text-slate-500">
-              <span>© {new Date().getFullYear()} Neubit · Face Recognition</span>
+              <span>© {new Date().getFullYear()} wonin.ai · Face Recognition</span>
               <span className="flex items-center gap-1.5"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400" style={{ animation: "frsPulse 1.6s ease-in-out infinite" }} /> System secure</span>
             </div>
           </div>
