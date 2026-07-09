@@ -55,6 +55,7 @@ services:
       VE_TRITON_URL: triton:8000
       VE_MEDIAMTX_URL: http://mediamtx:9997
       VE_MEDIAMTX_PUBLIC_WEBRTC_BASE: ${VIZOR_SITE_ADDRESS}/webrtc
+      VE_STORAGE_PROXY_URLS: "1"
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: "utility"
     volumes:

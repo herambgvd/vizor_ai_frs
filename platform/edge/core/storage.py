@@ -300,8 +300,10 @@ class S3Storage(Storage):
         # Encrypt-at-rest (biometric) media CANNOT be served straight from the bucket
         # — a presigned link would hand the browser ciphertext. Route those through
         # the backend proxy (/files), which fetches from S3 and decrypts in memory.
-        if _encrypts(key):
-            base = get_settings().storage_base_url.rstrip("/")
+        settings = get_settings()
+        if _encrypts(key) or settings.storage_proxy_urls:
+            # Proxy mode: same-origin /files/{key} — the backend streams from S3.
+            base = settings.storage_base_url.rstrip("/")
             return f"{base}/{key.lstrip('/')}"
         # Plain media keeps the efficient direct link. Presign against the
         # browser-reachable host (SigV4 binds the host into the signature, so it must

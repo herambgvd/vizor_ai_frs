@@ -115,6 +115,10 @@ class Settings(BaseSettings):
     storage_backend: str = "local"            # "local" | "s3"
     storage_local_dir: str = "./data/storage"
     storage_base_url: str = "/files"          # public URL prefix for local files
+    # Serve ALL media through the backend /files proxy instead of presigned S3
+    # links. For same-origin production (Caddy in front, S3 internal-only) —
+    # presigned URLs would point at a host the browser can't reach.
+    storage_proxy_urls: bool = False
     s3_endpoint: str | None = None            # e.g. http://minio:9000 (None = AWS)
     # Browser-reachable S3 host for presigned URLs when the internal endpoint above
     # is a private docker hostname (e.g. http://localhost:9000). None = use s3_endpoint.

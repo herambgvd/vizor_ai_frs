@@ -42,6 +42,12 @@
 		reverse_proxy backend:8000
 	}
 
+	# Media served through the backend storage proxy (/files/{key} — presign-free
+	# same-origin links; also decrypts encrypt-at-rest media in memory).
+	handle /files/* {
+		reverse_proxy backend:8000
+	}
+
 	# Live WebRTC/WHEP signaling → MediaMTX (same-origin so an HTTPS page can reach it
 	# without mixed-content blocking; the media itself flows over UDP :8189).
 	handle /webrtc/* {
