@@ -280,8 +280,12 @@ function personThrottled(ev) {
 // native EventSource, which also can't send an Authorization header — so we pass
 // the access token as ?token=, matching the backend's SSE auth).
 function _sseBase() {
+  // Same-origin production builds set NEXT_PUBLIC_API_URL="" — keep it EMPTY (relative
+  // URL through the reverse proxy). Use ?? not || so "" is preserved; || would treat
+  // the empty string as falsy and wrongly fall back to http://host:8000 (a direct
+  // backend port that isn't exposed behind Caddy → connection refused).
   const host = typeof window !== "undefined" ? window.location.hostname : "localhost";
-  return process.env.NEXT_PUBLIC_API_URL || `http://${host}:8000`;
+  return process.env.NEXT_PUBLIC_API_URL ?? `http://${host}:8000`;
 }
 
 // =============================================================================
