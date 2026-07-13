@@ -1,0 +1,68 @@
+# Vizor reverse proxy — serves the UI and the API on ONE origin over TLS.
+#
+# Because UI + API share an origin, the browser makes same-origin requests to
+# /api/* (no CORS, no per-client image rebuild) and the frontend image ships with
+# NEXT_PUBLIC_API_URL="" (relative /api/v1).
+#
+# VIZOR_SITE_ADDRESS is set by the installer, e.g. "https://192.168.1.50" for a
+# LAN/IP appliance. `tls internal` makes Caddy mint a cert from its built-in local
+# CA — no domain and no internet required (air-gapped friendly). For a client with a
+# real domain, the installer swaps this for automatic Let's Encrypt.
+
+{
+	# Serve the cert even when a client connects by bare IP and sends NO SNI (browsers
+	# and curl omit SNI for IP addresses) — without this the TLS handshake fails with
+	# "internal error". Global option, not a `tls` subdirective.
+	default_sni {$VIZOR_HOST_IP}
+}
+
+{$VIZOR_SITE_ADDRESS} {
+	# The site address carries the cert identity (e.g. the LAN IP), but that IP isn't
+	# on any interface inside the container — bind the listener to all interfaces and
+	# let the host port mapping route to it.
+	bind 0.0.0.0
+
+	# Explicit self-signed cert (SAN includes the LAN IP). The installer generates it
+	# per deployment.
+	tls /certs/cert.pem /certs/key.pem
+
+	encode gzip
+
+	# Security headers (the authoritative CSP tier — the frontend sets the rest).
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# API → backend (same origin as the UI).
+	handle /api/* {
+		reverse_proxy backend:8000
+	}
+
+	# Media served through the backend storage proxy (/files/{key} — presign-free
+	# same-origin links; also decrypts encrypt-at-rest media in memory).
+	handle /files/* {
+		reverse_proxy backend:8000
+	}
+
+	# Live WebRTC/WHEP signaling → MediaMTX (same-origin so an HTTPS page can reach it
+	# without mixed-content blocking; the media itself flows over UDP :8189).
+	handle /webrtc/* {
+		uri strip_prefix /webrtc
+		reverse_proxy mediamtx:8889
+	}
+
+	# Object storage (snapshots/crops) proxied so the UI never talks to S3 directly.
+	handle /s3/* {
+		uri strip_prefix /s3
+		reverse_proxy rustfs:9000
+	}
+
+	# Everything else → the Next.js standalone server.
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

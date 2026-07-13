@@ -87,6 +87,28 @@ def search_snapshots(vector, *, limit: int = 100, min_score: float = 0.0, camera
     return [{"score": float(h.score), **(h.payload or {})} for h in res.points]
 
 
+def scroll_snapshots(*, event_type: str | None = None, with_vectors: bool = True, limit: int = 20000) -> list[dict]:
+    """Bulk-read snapshot points (id + vector + payload), optionally filtered by
+    event_type. Used to cluster live sightings into unique people for counting."""
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    flt = None
+    if event_type:
+        flt = Filter(must=[FieldCondition(key="event_type", match=MatchValue(value=event_type))])
+    out: list[dict] = []
+    offset = None
+    client = _client()
+    while len(out) < limit:
+        points, offset = client.scroll(
+            SNAPSHOTS, scroll_filter=flt, with_vectors=with_vectors, with_payload=True,
+            limit=min(1000, limit - len(out)), offset=offset,
+        )
+        out.extend({"id": str(p.id), "vector": p.vector, "payload": p.payload or {}} for p in points)
+        if offset is None or not points:
+            break
+    return out
+
+
 def delete_snapshot(event_id: str) -> None:
     from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchValue
 

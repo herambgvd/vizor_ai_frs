@@ -114,7 +114,7 @@ export default function LoginPage() {
         <div className="mx-auto mb-4 h-11 w-11 rounded-lg bg-white flex items-center justify-center text-black text-lg font-bold">
           N
         </div>
-        <h1 className="text-lg font-semibold tracking-tight text-foreground">Sign in to Neubit</h1>
+        <h1 className="text-lg font-semibold tracking-tight text-foreground">Sign in to wonin.ai</h1>
         <p className="text-sm text-muted mt-1">Face recognition platform</p>
       </div>
       <form onSubmit={onSubmit} className="space-y-4">

@@ -6,16 +6,32 @@ import { useState } from "react";
 import { toast } from "sonner";
 
 import { Badge, Button, Card, EmptyState, Input, Select, Spinner } from "@/web/kit";
-import { api, apiError } from "@/web/api";
+import { api, apiError, fileUrl } from "@/web/api";
 
 import { fmt } from "./shared";
 
 const REPORTS = [
   { key: "attendance", label: "Attendance", icon: "heroicons-outline:calendar-days", desc: "Per-person daily presence" },
-  { key: "group", label: "Group", icon: "heroicons-outline:user-group", desc: "Sightings per group" },
-  { key: "mismatch", label: "Mismatch", icon: "heroicons-outline:exclamation-triangle", desc: "Low-confidence recognitions" },
+  { key: "group", label: "Group", icon: "heroicons-outline:user-group", desc: "Headcount & attendance compliance" },
+  { key: "mismatch", label: "Mismatch", icon: "heroicons-outline:exclamation-triangle", desc: "Transit entry/exit pairing" },
   { key: "unknown", label: "Unknown", icon: "heroicons-outline:question-mark-circle", desc: "Unidentified faces" },
 ];
+// Render a single report table cell: snapshot keys become <img> thumbnails,
+// *_pct columns get a % suffix, everything else is plain text.
+function renderCell(col, value) {
+  if (col === "snapshot") {
+    return value ? (
+      <img src={fileUrl(value)} alt="" loading="lazy" className="h-9 w-9 rounded object-cover" />
+    ) : (
+      <span className="flex h-9 w-9 items-center justify-center rounded bg-hover">
+        <Icon icon="heroicons-outline:user" className="text-muted" />
+      </span>
+    );
+  }
+  if (col.endsWith("_pct") && value != null && value !== "") return `${Math.round(Number(value))}%`;
+  return value ?? "—";
+}
+
 const today = () => new Date().toISOString().slice(0, 10);
 const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
 const SCHED_EMPTY = { name: "", report: "attendance", fmt: "xlsx", frequency: "daily", at_time: "08:00", range_days: 7, recipients: "" };
@@ -93,7 +109,7 @@ export default function ReportsTab() {
               <tbody>
                 {items.map((row, i) => (
                   <tr key={i} className="border-b border-card-border last:border-0">
-                    {cols.map((c) => <td key={c} className="px-4 py-2 text-foreground">{typeof row[c] === "number" && c === "confidence" ? `${Math.round(row[c] * 100)}%` : (row[c] ?? "—")}</td>)}
+                    {cols.map((c) => <td key={c} className="px-4 py-2 text-foreground">{renderCell(c, row[c])}</td>)}
                   </tr>
                 ))}
               </tbody>

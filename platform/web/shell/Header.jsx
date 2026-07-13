@@ -16,7 +16,7 @@ import { useTheme } from "@/web/theme";
 // Resolves the header brand from white-label branding:
 //   custom logo uploaded  -> show the logo image (no mark, no wordmark)
 //   name_in_header on     -> "N" mark + app name
-//   otherwise (default)   -> "N" mark + "Neubit"
+//   otherwise (default)   -> "N" mark + "wonin.ai"
 function Brand() {
   const { data } = useQuery({
     queryKey: ["branding"],
@@ -25,7 +25,7 @@ function Brand() {
   });
 
   const logo = data?.logo_url;
-  const name = data?.name_in_header && data?.app_name ? data.app_name : "Neubit";
+  const name = data?.name_in_header && data?.app_name ? data.app_name : "wonin.ai";
 
   return (
     <Link href="/" className="flex items-center gap-2.5">
@@ -35,7 +35,7 @@ function Brand() {
       ) : (
         <>
           <div className="h-6 w-6 rounded-md bg-white flex items-center justify-center text-black font-bold text-xs">
-            N
+            W
           </div>
           <span className="font-semibold text-foreground tracking-tight text-[15px]">{name}</span>
         </>

@@ -120,7 +120,7 @@ _SAMPLE_CTX = {
     "when": "Jul 3, 2026 · 14:22",
     "name": "Jane Doe",
     "download_url": "https://app.example.com/reports/monthly-attendance.pdf",
-    "app_name": "Neubit",
+    "app_name": "wonin.ai",
     "login_url": "https://app.example.com/login",
 }
 
@@ -141,7 +141,7 @@ def wrap_email(app_name: str, body_html: str) -> str:
     )
 
 
-async def render_preview(db, name: str, app_name: str = "Neubit") -> tuple[str, str]:
+async def render_preview(db, name: str, app_name: str = "wonin.ai") -> tuple[str, str]:
     """Render ``name`` with sample data and a branded shell → (subject, html)."""
     ctx = {**_SAMPLE_CTX, "app_name": app_name}
     subject, body = await render_with_overrides(db, name, ctx)

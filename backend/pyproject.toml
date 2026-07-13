@@ -11,7 +11,8 @@ requires-python = ">=3.11"
 # `edge` is the shared boilerplate at ../../boilerplate — installed editable in dev
 # (see docker-compose command / README). FRS-specific deps go here.
 dependencies = [
-    "qdrant-client>=1.9",     # vector matching (faceprints)
+    "qdrant-client>=1.9",         # vector matching (faceprints)
+    "tritonclient[http]>=2.40",   # shared-GPU Triton inference client
 ]
 
 [project.optional-dependencies]
@@ -21,3 +22,7 @@ dev     = ["pytest>=8", "pytest-asyncio>=0.23", "aiosqlite>=0.20"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

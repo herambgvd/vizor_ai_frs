@@ -13,6 +13,9 @@ const securityHeaders = [
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // Emit a self-contained production server (server.js + trimmed node_modules) so the
+  // prod image is small and needs no runtime install. Ignored by `next dev`.
+  output: "standalone",
   // Next 16 runs on Turbopack by default. We have no custom bundler rules
   // (SVGs are rendered via @iconify at runtime, not imported as modules), so no
   // webpack/turbopack config is required.

@@ -10,17 +10,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from edge.core.config import get_settings
 from edge.core.logging import get_logger
-from edge.models import get_face_engine
 
 from . import gallery
+from .recognition import get_engine
 
 log = get_logger("frs.live")
 
 # A gallery hit at or above this cosine is accepted as the person (unless the
 # camera sets a stricter min_confidence). Below it, the face is "unknown".
 RECOGNIZE_COSINE = 0.45
+# Anti-spoof gate — global module constants (vizor_nvr parity).
+PAD_ENABLED = False
+LIVENESS_THRESHOLD = 0.5
 
 
 @dataclass
@@ -32,14 +34,20 @@ class LiveFace:
     person_name: str | None
     liveness_score: float | None
     crop_bgr: object           # np.ndarray face crop (BGR) for the snapshot
+    embedding: object = None   # 512-d face embedding (for forensic snapshot indexing)
+    age: str | None = None
+    age_range: str | None = None
+    gender: str | None = None
+    gender_confidence: float | None = None
 
 
 def recognize_frame(bgr, *, min_confidence: float = 0.45, min_face_px: int = 40) -> list[LiveFace]:
     """Detect + recognise every face in a BGR frame. Returns one LiveFace each."""
-    eng = get_face_engine()
+    eng = get_engine()
     if not eng.available:
         return []
-    settings = get_settings()
+    pad_enabled = PAD_ENABLED
+    liveness_threshold = LIVENESS_THRESHOLD
     threshold = max(float(min_confidence), RECOGNIZE_COSINE)
 
     out: list[LiveFace] = []
@@ -51,11 +59,13 @@ def recognize_frame(bgr, *, min_confidence: float = 0.45, min_face_px: int = 40)
 
         # Anti-spoof gate (if enabled): a spoof short-circuits recognition.
         liveness = eng.liveness(bgr, face)
-        if settings.pad_enabled and liveness is not None and liveness < settings.pad_threshold:
+        if pad_enabled and liveness is not None and liveness < liveness_threshold:
             out.append(LiveFace("spoof_detected", [x1, y1, x2, y2], None, None, None, _round(liveness), crop))
             continue
 
-        vec = eng.embed(bgr, face.kps)
+        # Align (SCRFD landmarks → ArcFace template, YuNet fallback on degenerate
+        # points) + NLM denoise, then embed — the proven live recognition path.
+        vec = eng.embed_face(bgr, face, denoise=True)
         if vec is None:
             continue
         hits = gallery.search(vec, limit=1)

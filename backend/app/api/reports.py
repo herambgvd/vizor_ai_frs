@@ -9,21 +9,23 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import String, case, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from edge.auth.deps import require_permission
+from edge.auth.security import verify_password
 from edge.core.audit import record as audit_record
-from edge.core.errors import NotFoundError, ValidationError
+from edge.core.errors import ForbiddenError, NotFoundError, ValidationError
 from edge.core.pagination import Page, PageParams, page_params, paginate
 from edge.core.storage import get_storage
 from edge.db.base import get_db
 
 from .. import reports as rpt
-from ..domain.models import Attendance, FRSEvent, Person, ReportRun, ReportSchedule
+from ..domain.models import Attendance, Camera, FRSEvent, Person, ReportRun, ReportSchedule
 from ..domain.permissions import FrsPerm
+from ._scope import allowed_camera_ids
 
 router = APIRouter(prefix="/frs", tags=["frs-reports"])
 
@@ -46,12 +48,22 @@ async def attendance_log(
     if until:
         stmt = stmt.where(Attendance.day_key <= until)
     page = await paginate(db, stmt, params)
-    items = [
-        {"person_id": str(a.person_id) if a.person_id else None, "person_name": a.person_name,
-         "day": a.day_key, "check_in_at": a.check_in_at.isoformat() if a.check_in_at else None,
-         "check_out_at": a.check_out_at.isoformat() if a.check_out_at else None}
-        for a in page.items
-    ]
+    storage = get_storage()
+    items = []
+    for a in page.items:
+        ci, co = a.check_in_at, a.check_out_at
+        duration = int((co - ci).total_seconds()) if (ci and co and co >= ci) else None
+        items.append({
+            "id": str(a.id),
+            "person_id": str(a.person_id) if a.person_id else None,
+            "person_name": a.person_name,
+            "day": a.day_key,
+            "check_in_at": ci.isoformat() if ci else None,
+            "check_out_at": co.isoformat() if co else None,
+            "check_in_url": await storage.url(a.check_in_snapshot) if a.check_in_snapshot else None,
+            "check_out_url": await storage.url(a.check_out_snapshot) if a.check_out_snapshot else None,
+            "duration_seconds": duration,
+        })
     return {"items": items, "total": page.total, "page": page.page, "pages": page.pages}
 
 
@@ -64,16 +76,42 @@ async def attendance_report(
 ) -> dict:
     df = day_from or (dt.date.today() - dt.timedelta(days=30)).isoformat()
     dt_ = day_to or dt.date.today().isoformat()
+    # Group by person_id (stable identity) so two distinct people who happen to share
+    # a display name are not merged; fall back to the name only when person_id is null.
+    key = func.coalesce(cast(Attendance.person_id, String), Attendance.person_name)
     rows = (
         await db.execute(
-            select(Attendance.person_name, func.count(func.distinct(Attendance.day_key)),
+            select(func.max(Attendance.person_name), func.count(func.distinct(Attendance.day_key)),
                    func.min(Attendance.day_key), func.max(Attendance.day_key))
             .where(Attendance.day_key >= df, Attendance.day_key <= dt_)
-            .group_by(Attendance.person_name).order_by(func.count().desc())
+            .group_by(key).order_by(func.count().desc())
         )
     ).all()
     items = [{"person_name": n or "—", "days_present": d, "first_seen": f, "last_seen": l} for n, d, f, l in rows]
     return {"items": items, "day_from": df, "day_to": dt_}
+
+
+@router.delete("/attendance/{att_id}")
+async def delete_attendance(
+    att_id: uuid.UUID,
+    password: str = Body(..., embed=True),
+    db: AsyncSession = Depends(get_db),
+    actor=Depends(require_permission(FrsPerm.EVENT_MANAGE)),
+) -> dict:
+    """Delete one attendance record. Sensitive action — the operator must re-enter
+    their own password to confirm."""
+    if not password or not verify_password(password, actor.password_hash):
+        raise ForbiddenError("incorrect password")
+    row = await db.get(Attendance, att_id)
+    if row is None:
+        raise NotFoundError("attendance record not found")
+    await db.delete(row)
+    await db.commit()
+    await audit_record(
+        db, actor=actor, action="frs.attendance.delete", target_type="frs_attendance",
+        target_id=str(att_id), meta={"person": row.person_name, "day": row.day_key},
+    )
+    return {"status": "deleted"}
 
 
 # --- reports (static routes before the {report} catch-all) -------------------
@@ -82,14 +120,76 @@ async def reports_summary(
     db: AsyncSession = Depends(get_db),
     _=Depends(require_permission(FrsPerm.EVENT_READ)),
 ) -> dict:
-    async def _count(stmt):
-        return int(await db.scalar(stmt) or 0)
+    """Dashboard rollup: cameras, enrolled persons, all-time + today's event counts,
+    and today's distinct attendance. Computed as a handful of grouped aggregate
+    queries (one per table — no per-row N+1)."""
+    now = dt.datetime.now(dt.timezone.utc)
+    day_start = dt.datetime.combine(now.date(), dt.time.min, tzinfo=dt.timezone.utc)
+    today_key = now.date().isoformat()
 
-    total = await _count(select(func.count()).select_from(FRSEvent))
-    recognized = await _count(select(func.count()).select_from(FRSEvent).where(FRSEvent.event_type == "face_recognized"))
-    unknown = await _count(select(func.count()).select_from(FRSEvent).where(FRSEvent.event_type == "face_unknown"))
-    persons = await _count(select(func.count()).select_from(Person))
-    return {"total_events": total, "recognized": recognized, "unknown": unknown, "persons": persons}
+    def _i(v) -> int:
+        return int(v or 0)
+
+    # Cameras — total / online / recognising in a single row.
+    cam = (await db.execute(
+        select(
+            func.count(),
+            func.sum(case((Camera.status == "online", 1), else_=0)),
+            func.sum(case((Camera.recognition_enabled.is_(True), 1), else_=0)),
+        )
+    )).one()
+
+    # Persons — total / enrolled in a single row.
+    per = (await db.execute(
+        select(
+            func.count(),
+            func.sum(case((Person.enrollment_status == "enrolled", 1), else_=0)),
+        )
+    )).one()
+
+    # Events — all-time totals by type in a single row.
+    ev_all = (await db.execute(
+        select(
+            func.count(),
+            func.sum(case((FRSEvent.event_type == "face_recognized", 1), else_=0)),
+            func.sum(case((FRSEvent.event_type == "face_unknown", 1), else_=0)),
+        )
+    )).one()
+
+    # Events — today's totals by type in a single row.
+    ev_today = (await db.execute(
+        select(
+            func.count(),
+            func.sum(case((FRSEvent.event_type == "face_recognized", 1), else_=0)),
+            func.sum(case((FRSEvent.event_type == "face_unknown", 1), else_=0)),
+        ).where(FRSEvent.triggered_at >= day_start)
+    )).one()
+
+    # Distinct persons with an attendance row for today.
+    attendance_today = _i(await db.scalar(
+        select(func.count(func.distinct(Attendance.person_id)))
+        .where(Attendance.day_key == today_key, Attendance.person_id.is_not(None))
+    ))
+
+    return {
+        # Back-compat keys (unchanged meaning).
+        "total_events": _i(ev_all[0]),
+        "recognized": _i(ev_all[1]),
+        "unknown": _i(ev_all[2]),
+        "persons": _i(per[0]),
+        # Cameras.
+        "cameras_total": _i(cam[0]),
+        "cameras_online": _i(cam[1]),
+        "cameras_recognising": _i(cam[2]),
+        # Persons.
+        "persons_enrolled": _i(per[1]),
+        "persons_total": _i(per[0]),
+        # Today (UTC).
+        "events_today": _i(ev_today[0]),
+        "recognitions_today": _i(ev_today[1]),
+        "unknowns_today": _i(ev_today[2]),
+        "attendance_today": attendance_today,
+    }
 
 
 @router.get("/reports/{report}")
@@ -98,11 +198,12 @@ async def report_data(
     day_from: str | None = Query(default=None),
     day_to: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
+    cam_scope: set | None = Depends(allowed_camera_ids),
     _=Depends(require_permission(FrsPerm.EVENT_READ)),
 ) -> dict:
     if report not in rpt.REPORTS:
         raise ValidationError(f"unknown report; choose one of {', '.join(rpt.REPORTS)}")
-    return await rpt.build(db, report, day_from, day_to)
+    return await rpt.build(db, report, day_from, day_to, camera_ids=cam_scope)
 
 
 @router.get("/reports/{report}/export")
@@ -112,14 +213,15 @@ async def report_export(
     day_from: str | None = Query(default=None),
     day_to: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
+    cam_scope: set | None = Depends(allowed_camera_ids),
     _=Depends(require_permission(FrsPerm.EVENT_READ)),
 ) -> StreamingResponse:
     if report not in rpt.REPORTS:
         raise ValidationError("unknown report")
     if format not in ("csv", "xlsx"):
         raise ValidationError("format must be csv or xlsx")
-    data = await rpt.build(db, report, day_from, day_to)
-    blob, ctype = rpt.to_bytes(data, format)
+    data = await rpt.build(db, report, day_from, day_to, camera_ids=cam_scope)
+    blob, ctype = await rpt.to_bytes(data, format)
     fname = f"{report}-{dt.date.today().isoformat()}.{format}"
     return StreamingResponse(iter([blob]), media_type=ctype,
                              headers={"Content-Disposition": f"attachment; filename={fname}"})

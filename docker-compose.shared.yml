@@ -1,13 +1,13 @@
-# Frs — SHARED-INFRA mode. App services only; Postgres/Redis/Qdrant/RustFS/
+# FRS — SHARED-INFRA mode. App services only; Postgres/Redis/Qdrant/RustFS/
 # MediaMTX come from the shared `vizor-infra` stack (run it first). This scenario
 # joins the external `vizor_shared` network and reaches those services by their
 # stable hostnames (vizor-postgres, vizor-redis, …) via .env.shared.
 #
-#   cd ../vizor-infra && docker compose up -d          # once per host
-#   cp .env.shared.example .env.shared                 # here, in this repo
+#   cd ../vizor_ai_platform/vizor-infra && docker compose up -d   # once per host
+#   cp .env.shared.example .env.shared                            # here, in this repo
 #   docker compose -f docker-compose.shared.yml --env-file .env.shared up -d --build
 #
-# Host ports stay unique per scenario so many UIs/APIs coexist on one box.
+# Host ports: FRS is port-index 0 → backend 8000, frontend 3000.
 name: frs
 
 services:
@@ -43,6 +43,32 @@ services:
     networks: [vizor_shared]
     volumes: ["./platform:/edge", "./backend:/app"]
     command: celery -A edge.tasks.app.celery_app beat -l info
+
+  # Live FRS recognition supervisor. Off by default (profile "live") — needs real
+  # RTSP cameras. Enable with:
+  #   docker compose -f docker-compose.shared.yml --env-file .env.shared --profile live up -d streams
+  streams:
+    profiles: ["live"]
+    build: { context: ., dockerfile: backend/Dockerfile }
+    restart: unless-stopped
+    env_file: .env.shared
+    # GPU access so a camera's Decode="nvdec" can offload H.264/H.265 decode to the
+    # GPU's NVDEC engine (FFmpeg -hwaccel cuda). "video" is the capability that
+    # exposes the NVDEC/NVENC hardware; "compute,utility" round it out. Without this
+    # the nvdec setting is silently ignored and decode stays on the CPU.
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: "compute,video,utility"
+    networks: [vizor_shared]
+    volumes: ["./platform:/edge", "./backend:/app"]
+    command: python -m app.stream_supervisor
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu, video]
 
   frontend:
     build: { context: ./frontend, dockerfile: Dockerfile }

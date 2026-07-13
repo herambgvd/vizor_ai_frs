@@ -8,7 +8,6 @@ passes without an exit sighting. Sessions are opened/closed by the event pipelin
 
 from __future__ import annotations
 
-import datetime as dt
 import uuid
 
 from fastapi import APIRouter, Depends, Query
@@ -159,24 +158,10 @@ async def sweep_overdue(
     db: AsyncSession = Depends(get_db),
     actor=Depends(require_permission(FrsPerm.TRANSIT_MANAGE)),
 ) -> dict:
-    """Flip open sessions whose deadline has passed to ``overdue``."""
-    now = dt.datetime.now(dt.timezone.utc)
-    rows = (
-        await db.execute(select(TransitSession).where(TransitSession.status == "open"))
-    ).scalars().all()
-    flipped = 0
-    for s in rows:
-        deadline = (s.attributes or {}).get("deadline")
-        if not deadline:
-            continue
-        try:
-            dl = dt.datetime.fromisoformat(deadline)
-        except ValueError:
-            continue
-        if dl.tzinfo is None:
-            dl = dl.replace(tzinfo=dt.timezone.utc)
-        if dl < now:
-            s.status = "overdue"
-            flipped += 1
-    await db.commit()
+    """Flip open sessions whose deadline has passed to ``overdue`` AND emit a
+    ``transit_overdue`` event per flip (via the transit engine) so the alert
+    surfaces in Events + the live feed, not just as a buried status change."""
+    from .. import transit_engine
+
+    flipped = await transit_engine.sweep_overdue(db)
     return {"overdue": flipped}

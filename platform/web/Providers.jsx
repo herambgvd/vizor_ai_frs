@@ -10,7 +10,9 @@ import TitleSync from "@/web/TitleSync";
 
 function ThemedToaster() {
   const { theme } = useTheme();
-  return <Toaster theme={theme} position="bottom-right" richColors closeButton />;
+  // Auto-dismiss all toasts after 5s (individual toasts can override, e.g. a
+  // camera-offline alert stays until acknowledged with duration: Infinity).
+  return <Toaster theme={theme} position="bottom-right" richColors closeButton duration={5000} />;
 }
 
 // App-wide client providers: theme + TanStack Query + Auth + sonner toasts.

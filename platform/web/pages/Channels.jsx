@@ -14,12 +14,12 @@ const CHANNEL_FIELDS = {
     { key: "port", label: "Port", placeholder: "587" },
     { key: "username", label: "Username", placeholder: "no-reply@example.com" },
     { key: "password", label: "Password", type: "password" },
-    { key: "from_addr", label: "From address", placeholder: "Neubit <no-reply@example.com>" },
+    { key: "from_addr", label: "From address", placeholder: "wonin.ai <no-reply@example.com>" },
     { key: "use_tls", label: "Use TLS", type: "bool" },
   ],
   push: [{ key: "server_key", label: "FCM server key", type: "password" }],
   webhook: [
-    { key: "url", label: "Endpoint URL", placeholder: "https://hooks.example.com/neubit" },
+    { key: "url", label: "Endpoint URL", placeholder: "https://hooks.example.com/wonin" },
     { key: "secret", label: "Signing secret", type: "password" },
   ],
 };
@@ -135,7 +135,7 @@ export default function ChannelsPage() {
     <div>
       <PageHeader
         title="Channels"
-        subtitle="Configure how Neubit delivers notifications — email, push, and webhooks."
+        subtitle="Configure how wonin.ai delivers notifications — email, push, and webhooks."
       />
       {channels.isLoading ? (
         <div className="flex justify-center py-16">

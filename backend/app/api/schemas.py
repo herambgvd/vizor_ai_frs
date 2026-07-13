@@ -8,7 +8,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # --- groups ------------------------------------------------------------------
@@ -149,12 +149,25 @@ class CameraCreate(BaseModel):
     location: str | None = None
     zone: str | None = None
     enabled: bool = True
-    recognition_enabled: bool = True
-    min_confidence: float = 0.5
-    fps: int = 5
-    min_face_px: int = 40
+    # New cameras onboard with the scenario OFF — the operator configures params +
+    # ROI in the detail view, then turns recognition on. So a bare 3-field create
+    # (name/rtsp/location) never starts a worker.
+    recognition_enabled: bool = False
+    # Per-camera recognition tuning (vizor_nvr camera_config_schema parity).
+    min_confidence: float = Field(0.5, ge=0.3, le=0.99)
+    detection_enabled: bool = False
     direction: str = "both"        # entry | exit | both
+    liveness_enabled: bool = True
+    liveness_threshold: float = Field(0.7, ge=0.3, le=0.99)
+    det_conf: float = Field(0.5, ge=0.2, le=0.9)
+    min_face_px: int = Field(28, ge=12, le=400)
+    min_sharpness: int = Field(25, ge=0, le=200)
+    max_pose_deg: int = Field(60, ge=20, le=90)
+    dwell_min_frames: int = Field(3, ge=1, le=30)
+    alert_suppress_seconds: int = Field(300, ge=0, le=3600)
+    fps: int = Field(10, ge=1, le=15)
     hw_accel: str = "none"         # none | nvdec
+    analyze_width: int = Field(0, ge=0, le=3840)   # 0 = native; else downscale cap
     roi: list = []
 
 
@@ -165,11 +178,20 @@ class CameraUpdate(BaseModel):
     zone: str | None = None
     enabled: bool | None = None
     recognition_enabled: bool | None = None
-    min_confidence: float | None = None
-    fps: int | None = None
-    min_face_px: int | None = None
+    min_confidence: float | None = Field(None, ge=0.3, le=0.99)
+    detection_enabled: bool | None = None
     direction: str | None = None
+    liveness_enabled: bool | None = None
+    liveness_threshold: float | None = Field(None, ge=0.3, le=0.99)
+    det_conf: float | None = Field(None, ge=0.2, le=0.9)
+    min_face_px: int | None = Field(None, ge=12, le=400)
+    min_sharpness: int | None = Field(None, ge=0, le=200)
+    max_pose_deg: int | None = Field(None, ge=20, le=90)
+    dwell_min_frames: int | None = Field(None, ge=1, le=30)
+    alert_suppress_seconds: int | None = Field(None, ge=0, le=3600)
+    fps: int | None = Field(None, ge=1, le=15)
     hw_accel: str | None = None
+    analyze_width: int | None = Field(None, ge=0, le=3840)
     roi: list | None = None
 
 
@@ -183,10 +205,19 @@ class CameraOut(BaseModel):
     enabled: bool
     recognition_enabled: bool
     min_confidence: float
-    fps: int
-    min_face_px: int
+    detection_enabled: bool
     direction: str
+    liveness_enabled: bool
+    liveness_threshold: float
+    det_conf: float
+    min_face_px: int
+    min_sharpness: int
+    max_pose_deg: int
+    dwell_min_frames: int
+    alert_suppress_seconds: int
+    fps: int
     hw_accel: str
+    analyze_width: int
     roi: list
     status: str
     last_seen_at: dt.datetime | None
@@ -242,3 +273,14 @@ class FeedbackCreate(BaseModel):
     matched_person_id: uuid.UUID | None = None
     actual_person_id: uuid.UUID | None = None
     note: str | None = None
+
+
+# --- settings ----------------------------------------------------------------
+class FrsSettingsUpdate(BaseModel):
+    """Partial update of the FRS settings singleton (public dashboard + ingest API
+    feature toggles only). All fields optional; use ``exclude_unset`` so a partial
+    PUT never wipes untouched fields."""
+
+    public_dashboard_enabled: bool | None = None
+    public_show_names: bool | None = None
+    ingest_api_enabled: bool | None = None

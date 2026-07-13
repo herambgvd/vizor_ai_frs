@@ -26,6 +26,7 @@ from edge.db.base import get_db
 from .. import gallery
 from ..domain.models import FRSEvent, FRSFeedback, Person
 from ..domain.permissions import FrsPerm
+from ._scope import allowed_camera_ids
 from .schemas import EventBulkDelete, EventOut, EventPage, FeedbackCreate
 
 log = get_logger("frs.events")
@@ -57,9 +58,13 @@ async def list_events(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
+    cam_scope: set | None = Depends(allowed_camera_ids),
     _=Depends(require_permission(FrsPerm.EVENT_READ)),
 ) -> EventPage:
     base = _apply_filters(select(FRSEvent), camera_id=camera_id, person_id=person_id, event_type=event_type, since=since, until=until)
+    # C12 per-camera visibility scope (None = unrestricted).
+    if cam_scope is not None:
+        base = base.where(FRSEvent.camera_id.in_(cam_scope))
     total = int(await db.scalar(select(func.count()).select_from(base.subquery())) or 0)
     rows = (
         await db.execute(base.order_by(FRSEvent.triggered_at.desc()).limit(limit).offset(offset))

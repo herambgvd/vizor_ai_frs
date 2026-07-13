@@ -178,6 +178,10 @@ class S3Storage(Storage):
     def __init__(self) -> None:
         settings = get_settings()
         self._endpoint = settings.s3_endpoint       # None => real AWS
+        # Browser-reachable host for presigned URLs. The backend talks to S3 over the
+        # INTERNAL endpoint (e.g. http://vizor-rustfs:9000), which a browser can't
+        # resolve. When set, presigned links are rewritten to this public host.
+        self._public_endpoint = settings.s3_public_endpoint
         self._region = settings.s3_region
         self._bucket = settings.s3_bucket
         self._access_key = settings.s3_access_key
@@ -188,26 +192,36 @@ class S3Storage(Storage):
         # head+create dance happens at most once per process (see _ensure_bucket).
         self._bucket_ready = False
 
-    def _client(self):
+    def _client(self, *, presign: bool = False):
         """Build an aioboto3 S3 client context manager (used as ``async with``).
 
         Lazily imports aioboto3 so the import cost/dependency is only paid when
-        S3 is actually configured.
+        S3 is actually configured. ``presign=True`` targets the browser-reachable
+        endpoint so generated URLs work outside the docker network.
         """
         try:
             import aioboto3  # optional dependency
+            from botocore.config import Config
         except ImportError as exc:  # pragma: no cover - depends on env
             raise StorageError(
                 "S3Storage requires the 'aioboto3' package (pip install aioboto3)"
             ) from exc
 
+        # SigV4 + path-style addressing: what RustFS / MinIO expect. Without this
+        # botocore emits SigV2 presigned URLs (AWSAccessKeyId/Signature/Expires),
+        # which RustFS rejects with 403.
+        cfg = Config(signature_version="s3v4", s3={"addressing_style": "path"})
+        # For presigning, sign against the BROWSER-reachable host so the SigV4 host
+        # binding matches the request the browser actually makes.
+        endpoint = (self._public_endpoint or self._endpoint) if presign else self._endpoint
         session = aioboto3.Session()
         return session.client(
             "s3",
-            endpoint_url=self._endpoint,
+            endpoint_url=endpoint,
             region_name=self._region,
             aws_access_key_id=self._access_key,
             aws_secret_access_key=self._secret_key,
+            config=cfg,
         )
 
     async def _ensure_bucket(self, s3) -> None:
@@ -283,9 +297,18 @@ class S3Storage(Storage):
                 return False
 
     async def url(self, key: str, expires: int = 3600) -> str:
-        async with self._client() as s3:
-            # A presigned GET URL grants temporary read access without exposing
-            # credentials; it becomes invalid after ``expires`` seconds.
+        # Encrypt-at-rest (biometric) media CANNOT be served straight from the bucket
+        # — a presigned link would hand the browser ciphertext. Route those through
+        # the backend proxy (/files), which fetches from S3 and decrypts in memory.
+        settings = get_settings()
+        if _encrypts(key) or settings.storage_proxy_urls:
+            # Proxy mode: same-origin /files/{key} — the backend streams from S3.
+            base = settings.storage_base_url.rstrip("/")
+            return f"{base}/{key.lstrip('/')}"
+        # Plain media keeps the efficient direct link. Presign against the
+        # browser-reachable host (SigV4 binds the host into the signature, so it must
+        # match the request the browser makes).
+        async with self._client(presign=True) as s3:
             return await s3.generate_presigned_url(
                 "get_object",
                 Params={"Bucket": self._bucket, "Key": key},
@@ -327,16 +350,18 @@ async def serve_local_file(key: str):
     through the backend so they're decrypted in memory before reaching the client.
     """
     storage = get_storage()
-    # This route only makes sense for LocalStorage; guard defensively.
-    if not isinstance(storage, LocalStorage):
-        raise NotFoundError("local file serving is disabled for this storage backend")
-    path = storage._path(key)  # reuse the same escape-safe key→path mapping
-    if not path.is_file():
-        raise NotFoundError(f"object not found: {key}")
     ctype = mimetypes.guess_type(key)[0] or "application/octet-stream"
-    if _encrypts(key):
-        # Decrypt in memory; never hand the browser the ciphertext on disk.
-        data = _dec(key, path.read_bytes())
-        return Response(content=data, media_type=ctype)
-    # FileResponse streams the file efficiently and infers the Content-Type.
-    return FileResponse(os.fspath(path), media_type=ctype)
+    if isinstance(storage, LocalStorage):
+        path = storage._path(key)  # reuse the same escape-safe key→path mapping
+        if not path.is_file():
+            raise NotFoundError(f"object not found: {key}")
+        if _encrypts(key):
+            # Decrypt in memory; never hand the browser the ciphertext on disk.
+            return Response(content=_dec(key, path.read_bytes()), media_type=ctype)
+        # FileResponse streams the file efficiently and infers the Content-Type.
+        return FileResponse(os.fspath(path), media_type=ctype)
+    # S3 (or other remote) backend: encrypt-at-rest media is proxied here so it can
+    # be decrypted in memory before reaching the client (a direct bucket URL would
+    # serve ciphertext). Plain media uses direct presigned URLs and never hits this.
+    raw = await storage.get(key)
+    return Response(content=_dec(key, raw), media_type=ctype)

@@ -11,6 +11,7 @@ import uuid
 
 import jwt
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.errors import ConflictError, NotFoundError, UnauthorizedError, ValidationError
@@ -490,31 +491,43 @@ class AuthService:
     async def ensure_admin(
         self, email: str, password: str, full_name: str = "Administrator"
     ) -> User | None:
-        """Create the built-in Administrator role + first admin if there are no users."""
+        """Create the built-in Administrator role + first admin if there are no users.
+
+        Idempotent and race-safe: under a multi-worker server (gunicorn), every worker
+        runs this at startup, so the "no users yet" check is a classic TOCTOU — all
+        workers pass it and race to INSERT. The loser hits a unique-violation; we catch
+        it, roll back, and treat the admin as already provisioned (return None) instead
+        of crashing the worker on boot.
+        """
         if await self.db.scalar(select(func.count()).select_from(User)):
             return None
-        role = await self._role_by_name(ADMIN_ROLE_NAME)
-        if role is None:
-            role = Role(
-                name=ADMIN_ROLE_NAME,
-                description="Full access (system role)",
-                permissions=[WILDCARD],
-                is_system=True,
+        try:
+            role = await self._role_by_name(ADMIN_ROLE_NAME)
+            if role is None:
+                role = Role(
+                    name=ADMIN_ROLE_NAME,
+                    description="Full access (system role)",
+                    permissions=[WILDCARD],
+                    is_system=True,
+                )
+                self.db.add(role)
+                await self.db.commit()
+                await self.db.refresh(role)
+            admin = await self.create_user(
+                CreateUserIn(
+                    email=email, password=password, full_name=full_name or "Administrator",
+                    role_id=role.id,
+                )
             )
-            self.db.add(role)
+            # The bootstrap admin is trusted — mark it verified.
+            admin.email_verified = True
             await self.db.commit()
-            await self.db.refresh(role)
-        admin = await self.create_user(
-            CreateUserIn(
-                email=email, password=password, full_name=full_name or "Administrator",
-                role_id=role.id,
-            )
-        )
-        # The bootstrap admin is trusted — mark it verified.
-        admin.email_verified = True
-        await self.db.commit()
-        await self.db.refresh(admin)
-        return admin
+            await self.db.refresh(admin)
+            return admin
+        except IntegrityError:
+            # Another worker won the first-boot bootstrap race → already provisioned.
+            await self.db.rollback()
+            return None
 
     # --- API keys ----------------------------------------------------------
     async def create_api_key(self, data: ApiKeyCreateIn) -> tuple[ApiKey, str]:

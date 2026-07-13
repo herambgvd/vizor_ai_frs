@@ -21,6 +21,7 @@ import edge.core.audit  # noqa: F401
 import edge.messaging  # noqa: F401
 import edge.branding.models  # noqa: F401
 import edge.reports.models  # noqa: F401
+import edge.settings.models  # noqa: F401 — app_settings (platform settings store)
 
 # FRS-owned models (added as the domain is built), e.g.:
 # import app.domain  # noqa: F401

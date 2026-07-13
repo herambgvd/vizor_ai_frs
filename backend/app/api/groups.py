@@ -94,7 +94,14 @@ async def update_group(
     g = await db.get(Group, group_id)
     if g is None:
         raise NotFoundError("group not found")
-    patch = data.model_dump(exclude_none=True)
+    # exclude_unset (NOT exclude_none): apply exactly the fields the client sent,
+    # so an explicit null clears an optional field (e.g. turning the alert sound off
+    # or clearing the description). exclude_none dropped those nulls, making
+    # alert_sound / description impossible to clear once set.
+    patch = data.model_dump(exclude_unset=True)
+    # name is non-nullable — never let an explicit/absent null blank it.
+    if patch.get("name") is None:
+        patch.pop("name", None)
     if "name" in patch and patch["name"] != g.name:
         if (await db.execute(select(Group).where(Group.name == patch["name"]))).scalar_one_or_none():
             raise ConflictError("a group with that name already exists")
